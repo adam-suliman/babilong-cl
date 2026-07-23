@@ -325,9 +325,9 @@ def run_experiment(
             "A runtime max-step override would create a non-resumable stage boundary. "
             "Use --steps-per-task so the reduced budget is part of the protocol hash."
         )
-    free_disk_gb = shutil.disk_usage(
-        Path(config.results_root).resolve().parent
-    ).free / (1024**3)
+    disk_root = Path(config.results_root).resolve().parent
+    disk_root.mkdir(parents=True, exist_ok=True)
+    free_disk_gb = shutil.disk_usage(disk_root).free / (1024**3)
     if free_disk_gb < config.minimum_free_disk_gb:
         raise RuntimeError(
             f"Disk preflight failed: {free_disk_gb:.1f} GB free, "
