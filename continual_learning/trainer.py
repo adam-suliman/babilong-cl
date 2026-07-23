@@ -20,6 +20,7 @@ from .config import CANONICAL_TASKS, ExperimentConfig, stable_seed
 from .data import OfficialCollator, TokenizedBabilongDataset
 from .metrics import (
     continual_metrics,
+    decode_generated_answer,
     empty_matrix,
     score_prediction,
 )
@@ -748,16 +749,7 @@ class UnifiedTrainer:
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
             )
-            decoded = self.tokenizer.decode(
-                output_ids[0].detach().cpu(),
-                skip_special_tokens=False,
-            )
-            eos_text = self.tokenizer.eos_token or "<|endoftext|>"
-            prediction = (
-                decoded.split(eos_text, 1)[1].strip()
-                if eos_text in decoded
-                else decoded.strip()
-            )
+            prediction = decode_generated_answer(self.tokenizer, output_ids[0])
             target = str(batch["target_text"][0])
             source_row = source_rows[int(batch["row_index"][0])]
             result = score_prediction(

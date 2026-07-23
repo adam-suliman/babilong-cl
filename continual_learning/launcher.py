@@ -7,7 +7,6 @@ import shutil
 import subprocess
 import sys
 import time
-from collections import deque
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, Sequence
@@ -23,6 +22,32 @@ CONDITIONS = {
     "fastmem0": ("fastmem0", "none"),
     "fastmem": ("fastmem", "none"),
 }
+
+
+def _take_launchable_assignment(
+    pending: list[dict[str, Any]],
+    slots: list[tuple[str, int]],
+    running: dict[
+        int,
+        tuple[
+            subprocess.Popen[Any],
+            tuple[str, int],
+            dict[str, Any],
+            Any,
+        ],
+    ],
+) -> tuple[dict[str, Any], tuple[str, int]] | None:
+    for job_index, job in enumerate(pending):
+        for slot_index, slot in enumerate(slots):
+            gpu, _ = slot
+            if job["cl_method"] == "si" and any(
+                running_slot[0] == gpu
+                and running_job["cl_method"] == "si"
+                for _, running_slot, running_job, _ in running.values()
+            ):
+                continue
+            return pending.pop(job_index), slots.pop(slot_index)
+    return None
 
 
 def launch_suite(
@@ -157,6 +182,7 @@ def launch_suite(
         "order_seeds": list(order_seeds),
         "gpus": list(gpus),
         "jobs_per_gpu": jobs_per_gpu,
+        "gpu_placement_policy": "at-most-one-si-job-per-gpu",
         "si_lambda": si_lambda,
         "jobs": jobs,
         "skipped_completed_jobs": completed_jobs,
@@ -172,11 +198,14 @@ def launch_suite(
         atomic_write_json(suite_dir / "manifest.json", manifest)
         return manifest
 
-    slots = deque(
+    slots = list(
         (gpu, slot) for gpu in gpus for slot in range(jobs_per_gpu)
     )
-    pending = deque(pending_jobs)
-    running: dict[int, tuple[subprocess.Popen[Any], tuple[str, int], dict[str, Any], Any]] = {}
+    pending = list(pending_jobs)
+    running: dict[
+        int,
+        tuple[subprocess.Popen[Any], tuple[str, int], dict[str, Any], Any],
+    ] = {}
     failures: list[dict[str, Any]] = []
     launched_jobs: list[dict[str, Any]] = []
     stop_requested = False
@@ -192,8 +221,14 @@ def launch_suite(
     try:
         while pending or running:
             while pending and slots and not stop_requested and not failures:
-                job = pending.popleft()
-                slot = slots.popleft()
+                assignment = _take_launchable_assignment(
+                    pending,
+                    slots,
+                    running,
+                )
+                if assignment is None:
+                    break
+                job, slot = assignment
                 gpu, _ = slot
                 log_path = suite_dir / (
                     f"{job['condition']}_r{job['replicate_seed']}"

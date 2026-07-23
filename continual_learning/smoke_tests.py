@@ -19,7 +19,8 @@ from .config import (
     task_sampler_seeds,
 )
 from .data import OfficialCollator
-from .metrics import continual_metrics
+from .launcher import _take_launchable_assignment
+from .metrics import continual_metrics, decode_generated_answer
 from .models import build_model
 from .reporting import strict_fastmem_claim, write_run_artifacts
 from .strategies import SynapticIntelligence, SynapticIntelligenceConfig
@@ -181,6 +182,13 @@ def test_config_and_collation_contract() -> None:
 
 
 def test_metrics() -> None:
+    tokenizer = TinyTokenizer()
+    assert (
+        decode_generated_answer(tokenizer, torch.tensor([10, 0]))
+        == "kitchen"
+    )
+    assert decode_generated_answer(tokenizer, torch.tensor([0])) == ""
+
     order = resolve_task_order(48)
     columns = {task: index for index, task in enumerate(CANONICAL_TASKS)}
     matrix = [[0.1] * 6 for _ in range(7)]
@@ -241,6 +249,36 @@ def test_metrics() -> None:
             )
         claim = strict_fastmem_claim(raws)
         assert claim["allowed"] is True
+
+
+def test_si_gpu_placement() -> None:
+    running = {
+        1: (
+            None,
+            ("0", 0),
+            {"condition": "gpt2-si", "cl_method": "si"},
+            None,
+        )
+    }
+    pending = [
+        {"condition": "gpt2-si", "cl_method": "si"},
+        {"condition": "base-rmt", "cl_method": "none"},
+    ]
+    slots = [("0", 1), ("1", 0)]
+    assignment = _take_launchable_assignment(pending, slots, running)
+    assert assignment is not None
+    job, slot = assignment
+    assert job["condition"] == "gpt2-si"
+    assert slot[0] == "1"
+
+    assert (
+        _take_launchable_assignment(
+            [{"condition": "gpt2-si", "cl_method": "si"}],
+            [("0", 1)],
+            running,
+        )
+        is None
+    )
 
 
 def test_si_equations() -> None:
@@ -604,6 +642,7 @@ def main() -> None:
         ("seed contract", test_seed_contract),
         ("config/collation contract", test_config_and_collation_contract),
         ("metrics", test_metrics),
+        ("SI GPU placement", test_si_gpu_placement),
         ("SI equations", test_si_equations),
         ("model/FastMem contract", test_model_and_fastmem_contract),
         ("tiny end-to-end/resume", test_tiny_end_to_end_and_resume),

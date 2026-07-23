@@ -8,6 +8,19 @@ from babilong.metrics import TASK_LABELS, compare_answers
 from .config import CANONICAL_TASKS
 
 
+def decode_generated_answer(tokenizer: Any, output_ids: Any) -> str:
+    """Decode generated-only token IDs up to the first EOS token."""
+
+    if hasattr(output_ids, "detach"):
+        token_ids = output_ids.detach().cpu().tolist()
+    else:
+        token_ids = list(output_ids)
+    eos_token_id = tokenizer.eos_token_id
+    if eos_token_id is not None and eos_token_id in token_ids:
+        token_ids = token_ids[: token_ids.index(eos_token_id)]
+    return tokenizer.decode(token_ids, skip_special_tokens=True).strip()
+
+
 def strict_exact_match(target: str, prediction: str) -> bool:
     return target.strip().lower() == prediction.strip().lower()
 

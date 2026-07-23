@@ -10,7 +10,7 @@ from typing import Any, Mapping, Sequence
 from .util import json_sha256
 
 
-PROTOCOL_VERSION = "babilong-qa6-0k-cl-v1"
+PROTOCOL_VERSION = "babilong-qa6-0k-cl-v2"
 CANONICAL_TASKS = ("qa1", "qa2", "qa3", "qa11", "qa12", "qa13")
 MODEL_KEYS = ("gpt2", "base_rmt", "fastmem0", "fastmem")
 CL_METHODS = ("none", "si")
@@ -18,7 +18,7 @@ DEFAULT_DATA_SEED = 481113
 DEFAULT_REPLICATE_SEED = 48
 DEFAULT_ORDER_SEED = 48
 DEFAULT_RESULTS_ROOT = Path("results/babilong_cl")
-DEFAULT_PROTOCOL_PATH = Path(__file__).parent / "configs" / "qa6_0k_v1.json"
+DEFAULT_PROTOCOL_PATH = Path(__file__).parent / "configs" / "qa6_0k_v2.json"
 
 
 def stable_seed(namespace: str, seed: int, key: str) -> int:

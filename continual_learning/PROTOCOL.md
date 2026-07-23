@@ -103,7 +103,10 @@ See `strategies/PROVENANCE.json`.
 ## Evaluation And CL Metrics
 
 All six public tasks are evaluated before training and after each task,
-producing a `7 x 6` matrix. Deterministic short generation is used.
+producing a `7 x 6` matrix. Deterministic short generation is used. The
+official wrapper returns generated-only token IDs under the pinned
+Transformers version; evaluation truncates these IDs at the first EOS token
+before decoding the answer.
 
 Primary quality is official BABILong `compare_answers`; strict normalized exact
 match is secondary. Reports include:

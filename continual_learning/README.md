@@ -41,7 +41,7 @@ smokes and development.
 
 ## Seed Contract
 
-- `data_seed=481113` fixes the datasets and is rejected if changed in protocol v1.
+- `data_seed=481113` fixes the datasets and is rejected if changed in protocol v2.
 - `order_seed` deterministically selects the six-task permutation. The same
   value gives every model the same order.
 - `replicate_seed` controls model initialization and training randomness.
