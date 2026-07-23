@@ -7,7 +7,6 @@ qa1, qa2, qa3, qa11, qa12, qa13
 ```
 
 The primary condition is `0k`: task facts only, with no PG19 background.
-Read [PROTOCOL.md](PROTOCOL.md) before using results in a paper.
 
 ## Setup
 
