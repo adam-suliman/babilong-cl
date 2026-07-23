@@ -351,12 +351,21 @@ def main(argv: list[str] | None = None) -> None:
             si_lambda=None,
             include_references=False,
         )
-        payload = calibrate_si(
-            base,
-            babi_archive=args.babi_archive,
-            lambdas=tuple(args.lambdas),
-            tensorboard=not args.no_tensorboard,
-        )
+        try:
+            payload = calibrate_si(
+                base,
+                babi_archive=args.babi_archive,
+                lambdas=tuple(args.lambdas),
+                tensorboard=not args.no_tensorboard,
+            )
+        except InterruptedError as error:
+            print(
+                json.dumps(
+                    {"status": "interrupted", "detail": str(error)},
+                    indent=2,
+                )
+            )
+            raise SystemExit(130)
         print(json.dumps(payload, indent=2, sort_keys=True))
         return
     if args.command == "suite":

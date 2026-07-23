@@ -188,6 +188,10 @@ class UnifiedTrainer:
 
     def _install_signal_handlers(self) -> None:
         def handler(signum: int, _frame: Any) -> None:
+            if self.stop_requested:
+                raise KeyboardInterrupt(
+                    f"Forced stop after repeated signal {signum}"
+                )
             self.stop_requested = True
 
         for signum in (signal.SIGINT, signal.SIGTERM):
@@ -734,6 +738,8 @@ class UnifiedTrainer:
         compare_count = 0
         exact_count = 0
         for index in range(len(dataset)):
+            if self.stop_requested:
+                raise InterruptedError("Stop requested during evaluation")
             batch = _to_device(self.collator([dataset[index]]), self.device)
             output_ids = self.bundle.model.generate(
                 batch["input_ids_generate"],
