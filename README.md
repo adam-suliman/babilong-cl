@@ -71,6 +71,16 @@ Examples for evaluation of popular LLMs are provided in the `./notebooks` and `.
 - [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/booydar/babilong/blob/main/notebooks/demo_llm.ipynb) [Train your long-context model](https://github.com/booydar/babilong/blob/main/notebooks/demo_llm.ipynb)
 - [Training data](https://huggingface.co/datasets/RMT-team/babilong-train-5k-samples) split with 5000 samples per task and length.
 
+### Six-task continual-learning experiment
+
+This fork includes a reproducible 0k continual-learning protocol over
+QA1, QA2, QA3, QA11, QA12, and QA13. It compares fine-tuned GPT-2,
+GPT-2 with Synaptic Intelligence, the exact released GPT-2 RMT wrapper,
+FastMem-RMT with `fast_lr=0`, and FastMem-RMT with nonzero fast updates.
+
+Setup, launch, provenance, data, metrics, checkpoints, and result-tree
+documentation are in [continual_learning/README.md](continual_learning/README.md).
+
 
 ### Example for running RMT
 

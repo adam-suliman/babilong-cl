@@ -1,0 +1,20 @@
+{
+  "license": "Apache-2.0",
+  "source_commit": "5a3d0722a10dc874b69075d74a8f66bffb957c2d",
+  "source_repository": "https://github.com/booydar/recurrent-memory-transformer",
+  "source_ref": "babilong-release",
+  "files": {
+    "babilong_utils.py": {
+      "sha256": "8a6e6e429d9cf41d555a2a7583cf1947640a44b53e453548dae9d745a837065c",
+      "source_url": "https://github.com/booydar/recurrent-memory-transformer/blob/5a3d0722a10dc874b69075d74a8f66bffb957c2d/babilong_utils.py"
+    },
+    "modeling_rmt/language_modeling.py": {
+      "sha256": "67d1f2e70992add1b976f02afa4f7acf82bc0a10506ff61dda4c020b225e1a12",
+      "source_url": "https://github.com/booydar/recurrent-memory-transformer/blob/5a3d0722a10dc874b69075d74a8f66bffb957c2d/modeling_rmt/language_modeling.py"
+    }
+  },
+  "notes": [
+    "The listed source files are vendored byte-for-byte unchanged.",
+    "Local training, continual-learning orchestration, FastMem, SI, checkpointing, and reporting are adaptations and are not claimed to be byte-identical upstream code."
+  ]
+}

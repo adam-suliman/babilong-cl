@@ -163,3 +163,10 @@ cython_debug/
 
 babilong_evals*/
 babilong_results*/
+
+# Local experiment state and IDE metadata
+/results/
+/checkpoints/
+/reports/
+/.local_archive/
+/.vscode/

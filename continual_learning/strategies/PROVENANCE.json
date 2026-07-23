@@ -1,0 +1,19 @@
+{
+  "implementation": "behavior-compatible adaptation",
+  "license": "Apache-2.0",
+  "local_mqar_commit": "3fa3a9eca17eadb34032c305cd457547805a5afa",
+  "local_mqar_file": "zoology/experiments/rmt_mqar/class_incremental_ar_permuted_si.py",
+  "local_mqar_file_sha256": "a3d7a048d9c233f0f388c169bacc70a501b1ee6598080555d29c4af72eb6ea8e",
+  "source_repository": "https://github.com/adam-suliman/zoology-mqar-fmrmt",
+  "source_url": "https://github.com/adam-suliman/zoology-mqar-fmrmt/blob/3fa3a9eca17eadb34032c305cd457547805a5afa/zoology/experiments/rmt_mqar/class_incremental_ar_permuted_si.py",
+  "adapted_file_sha256": "2a093127954fdf6d2a0f1f6b1eeb09ebec86dc8890500013a4150eed1031ea84",
+  "paper": {
+    "title": "Continual Learning Through Synaptic Intelligence",
+    "url": "https://proceedings.mlr.press/v70/zenke17a.html"
+  },
+  "notes": [
+    "The adaptation matches the SI equations and hook timing used by the local MQAR experiment.",
+    "It is not byte-identical to MQAR, original Path Integral code, or Avalanche SI.",
+    "Only slow optimizer-owned parameters are protected."
+  ]
+}

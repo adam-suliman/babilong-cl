@@ -1,0 +1,3 @@
+# These files are byte-identical upstream snapshots; preserve their whitespace.
+continual_learning/third_party/rmt_babilong_release/babilong_utils.py whitespace=-trailing-space
+continual_learning/third_party/rmt_babilong_release/modeling_rmt/language_modeling.py whitespace=-trailing-space
