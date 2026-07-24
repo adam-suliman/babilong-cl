@@ -8,7 +8,35 @@ from typing import Any, Mapping, Sequence
 
 from .config import CANONICAL_TASKS
 from .metrics import continual_metrics, matrix_long_rows
-from .util import atomic_write_json, atomic_write_text, write_csv
+from .util import atomic_write_json, atomic_write_text, json_sha256, write_csv
+
+
+FASTMEM_MATCH_FIELDS = (
+    "protocol_version",
+    "backbone",
+    "backbone_revision",
+    "cl_method",
+    "replicate_seed",
+    "order_seed",
+    "data_seed",
+    "task_order",
+    "precision",
+    "deterministic",
+    "label_mask_policy",
+    "loss_normalization",
+    "slow_steps_per_task",
+    "warmup_steps",
+    "learning_rates",
+    "weight_decay",
+    "clip_grad_norm",
+    "microbatch_size",
+    "slow_batch_size",
+    "fast_batch_size",
+    "fast_clip_norm",
+    "n_mem",
+    "segment_size",
+    "max_n_segments",
+)
 
 
 def percent(value: float | None) -> str:
@@ -255,36 +283,11 @@ def strict_fastmem_claim(
     required = {"base_rmt", "fastmem0", "fastmem"}
     if not required.issubset(by_model):
         return {"allowed": False, "reason": "matched method-control triad is incomplete"}
-    fields = [
-        "backbone",
-        "backbone_revision",
-        "cl_method",
-        "replicate_seed",
-        "order_seed",
-        "data_seed",
-        "task_order",
-        "precision",
-        "deterministic",
-        "label_mask_policy",
-        "loss_normalization",
-        "slow_steps_per_task",
-        "warmup_steps",
-        "learning_rates",
-        "weight_decay",
-        "clip_grad_norm",
-        "microbatch_size",
-        "slow_batch_size",
-        "fast_batch_size",
-        "fast_clip_norm",
-        "n_mem",
-        "segment_size",
-        "max_n_segments",
-    ]
     base_config = by_model["base_rmt"]["config"]
     mismatches = []
     for model in ("fastmem0", "fastmem"):
         config = by_model[model]["config"]
-        for field in fields:
+        for field in FASTMEM_MATCH_FIELDS:
             if config.get(field) != base_config.get(field):
                 mismatches.append(f"{model}:{field}")
         if by_model[model]["data_manifest_sha256"] != by_model["base_rmt"][
@@ -370,10 +373,35 @@ def strict_fastmem_claim(
     }
 
 
+def _comparison_protocol_sha256(config: Mapping[str, Any]) -> str:
+    payload = dict(config)
+    for field in (
+        "replicate_seed",
+        "task_sampler_seeds",
+        "protocol_hash",
+        "run_dir",
+        "tensorboard_dir",
+        "results_root",
+        "data_dir",
+        "device",
+        "require_clean_git",
+        "include_references",
+        "checkpoint_interval",
+        "log_interval",
+        "minimum_free_disk_gb",
+    ):
+        payload.pop(field, None)
+    return json_sha256(payload)
+
+
 def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[str, Any]:
     root = Path(results_root)
     runs = []
-    for path in root.glob("runs/*/*/replicate-*/order-*/raw.json"):
+    raw_paths = set(root.glob("runs/*/*/replicate-*/order-*/raw.json"))
+    raw_paths.update(
+        root.glob("runs/*/*/replicate-*/order-*/protocol-*/raw.json")
+    )
+    for path in sorted(raw_paths):
         raw = json.loads(path.read_text(encoding="utf-8"))
         if raw.get("status") == "complete":
             runs.append({"path": str(path), "raw": raw})
@@ -390,6 +418,11 @@ def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[
                 "replicate_seed": raw["config"]["replicate_seed"],
                 "order_seed": raw["config"]["order_seed"],
                 "task_order": "->".join(raw["task_order"]),
+                "protocol_version": raw["config"].get("protocol_version"),
+                "protocol_hash": raw["config"].get("protocol_hash"),
+                "comparison_protocol_sha256": _comparison_protocol_sha256(
+                    raw["config"]
+                ),
                 **{
                     key: metrics.get(key)
                     for key in (
@@ -418,22 +451,35 @@ def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[
         "intransigence",
         "plasticity_ratio",
     )
-    grouped: dict[tuple[str, str, int], list[dict[str, Any]]] = defaultdict(list)
+    grouped: dict[
+        tuple[str, str, int, str, str],
+        list[dict[str, Any]],
+    ] = defaultdict(list)
     for row in rows:
         grouped[
             (
                 str(row["architecture"]),
                 str(row["method"]),
                 int(row["order_seed"]),
+                str(row["task_order"]),
+                str(row["comparison_protocol_sha256"]),
             )
         ].append(row)
     group_rows = []
-    for (architecture, method, order_seed), items in sorted(grouped.items()):
+    for (
+        architecture,
+        method,
+        order_seed,
+        task_order,
+        comparison_protocol_sha256,
+    ), items in sorted(grouped.items()):
         group_row: dict[str, Any] = {
             "architecture": architecture,
             "method": method,
             "order_seed": order_seed,
-            "task_order": items[0]["task_order"],
+            "task_order": task_order,
+            "protocol_version": items[0]["protocol_version"],
+            "comparison_protocol_sha256": comparison_protocol_sha256,
             "n": len(items),
             "replicate_seeds": ",".join(
                 str(item["replicate_seed"]) for item in items
@@ -454,22 +500,23 @@ def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[
         group_rows.append(group_row)
     write_csv(destination / "group_summary.csv", group_rows)
 
-    matched: dict[tuple[int, int, str], list[Mapping[str, Any]]] = defaultdict(list)
+    matched: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in runs:
         raw = item["raw"]
         if raw["config"]["model"] in {"base_rmt", "fastmem0", "fastmem"}:
-            matched[
-                (
-                    int(raw["config"]["replicate_seed"]),
-                    int(raw["config"]["order_seed"]),
-                    str(raw["data_manifest_sha256"]),
-                )
-            ].append(raw)
+            family = {
+                field: raw["config"].get(field)
+                for field in FASTMEM_MATCH_FIELDS
+            }
+            family["data_manifest_sha256"] = raw["data_manifest_sha256"]
+            matched[json_sha256(family)].append(raw)
     claim_guards = [
         {
-            "replicate_seed": key[0],
-            "order_seed": key[1],
-            "data_manifest_sha256": key[2],
+            "comparison_family_sha256": key,
+            "replicate_seed": value[0]["config"]["replicate_seed"],
+            "order_seed": value[0]["config"]["order_seed"],
+            "task_order": value[0]["task_order"],
+            "data_manifest_sha256": value[0]["data_manifest_sha256"],
             **strict_fastmem_claim(value),
         }
         for key, value in sorted(matched.items())
@@ -488,8 +535,8 @@ def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[
         "",
         f"Completed runs: `{len(runs)}`",
         "",
-        "| Architecture | Method | Order seed | n | Learning | Final | Forgetting | BWT | Plasticity |",
-        "|---|---|---:|---:|---:|---:|---:|---:|---:|",
+        "| Architecture | Method | Order seed | Protocol | n | Learning | Final | Forgetting | BWT | Plasticity |",
+        "|---|---|---:|---|---:|---:|---:|---:|---:|---:|",
     ]
     for row in group_rows:
         def render(key: str) -> str:
@@ -506,6 +553,7 @@ def aggregate_results(results_root: str | Path, output_dir: str | Path) -> dict[
                     str(row["architecture"]),
                     str(row["method"]),
                     str(row["order_seed"]),
+                    str(row["comparison_protocol_sha256"])[:12],
                     str(row["n"]),
                     render("learning_accuracy"),
                     render("final_all_task_accuracy"),
@@ -535,7 +583,11 @@ def _plot_aggregate(
     by_condition: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     for item in runs:
         raw = item["raw"]
-        condition = f"{raw['config']['architecture']}/{raw['config']['method']}"
+        comparison = _comparison_protocol_sha256(raw["config"])[:8]
+        condition = (
+            f"{raw['config']['architecture']}/{raw['config']['method']}"
+            f"/o{raw['config']['order_seed']}/{comparison}"
+        )
         by_condition[condition].append(raw)
     stage_keys = (
         ("mean_seen_accuracy", "Mean seen accuracy"),

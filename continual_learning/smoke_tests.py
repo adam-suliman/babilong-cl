@@ -26,7 +26,11 @@ from .losses import (
 )
 from .metrics import continual_metrics, decode_generated_answer
 from .models import build_model
-from .reporting import strict_fastmem_claim, write_run_artifacts
+from .reporting import (
+    aggregate_results,
+    strict_fastmem_claim,
+    write_run_artifacts,
+)
 from .strategies import SynapticIntelligence, SynapticIntelligenceConfig
 from .trainer import EpochBatchCursor, UnifiedTrainer, _task_scheduler
 from .util import atomic_write_json, json_sha256, seed_everything
@@ -438,6 +442,69 @@ def test_metrics() -> None:
             )
         claim = strict_fastmem_claim(raws)
         assert claim["allowed"] is True
+
+
+def test_protocol_v3_aggregation() -> None:
+    with tempfile.TemporaryDirectory(
+        prefix="babilong-cl-aggregate-smoke-"
+    ) as temporary:
+        root = Path(temporary)
+        results_root = root / "results"
+        for replicate_seed in (48, 49):
+            config = replace(
+                _tiny_config(root, "gpt2"),
+                replicate_seed=replicate_seed,
+                results_root=str(results_root),
+            )
+            stagewise = [
+                {
+                    "mean_seen_accuracy": (
+                        None if stage == 0 else 0.5 + 0.01 * stage
+                    ),
+                    "current_task_accuracy": (
+                        None if stage == 0 else 0.6 + 0.01 * stage
+                    ),
+                    "forgetting_from_learning": (
+                        None if stage < 2 else 0.01 * stage
+                    ),
+                    "bwt": None if stage < 2 else -0.01 * stage,
+                }
+                for stage in range(len(CANONICAL_TASKS) + 1)
+            ]
+            atomic_write_json(
+                config.run_dir / "raw.json",
+                {
+                    "status": "complete",
+                    "config": config.to_dict(),
+                    "task_order": list(config.resolved_order),
+                    "data_manifest_sha256": "aggregate-smoke-data",
+                    "metrics": {
+                        "compare_answers": {
+                            "learning_accuracy": 0.7,
+                            "final_all_task_accuracy": 0.6,
+                            "final_old_task_accuracy": 0.58,
+                            "forgetting_from_learning": 0.1,
+                            "bwt": -0.1,
+                            "forward_transfer": 0.02,
+                            "intransigence": 0.05,
+                            "plasticity_ratio": 0.9,
+                            "stagewise": stagewise,
+                        }
+                    },
+                },
+            )
+
+        output = root / "aggregate"
+        payload = aggregate_results(results_root, output)
+        assert payload["completed_runs"] == 2
+        assert len(payload["groups"]) == 1
+        assert payload["groups"][0]["n"] == 2
+        assert payload["groups"][0]["replicate_seeds"] == "48,49"
+        assert (output / "aggregate.json").is_file()
+        assert (output / "run_summary.csv").is_file()
+        assert (output / "group_summary.csv").is_file()
+        assert (output / "summary.md").is_file()
+        assert (output / "plots" / "stage_metrics.png").is_file()
 
 
 def test_si_gpu_placement() -> None:
@@ -876,6 +943,7 @@ def main() -> None:
             test_token_normalization_and_microbatch_equivalence,
         ),
         ("metrics", test_metrics),
+        ("protocol-v3 aggregation", test_protocol_v3_aggregation),
         ("SI GPU placement", test_si_gpu_placement),
         ("SI equations", test_si_equations),
         ("model/FastMem contract", test_model_and_fastmem_contract),
