@@ -18,6 +18,10 @@ from .checkpointing import (
 )
 from .config import CANONICAL_TASKS, ExperimentConfig, stable_seed
 from .data import OfficialCollator, TokenizedBabilongDataset
+from .losses import (
+    masked_causal_cross_entropy,
+    shifted_supervised_token_count,
+)
 from .metrics import (
     continual_metrics,
     decode_generated_answer,
@@ -36,7 +40,7 @@ from .util import (
 )
 
 
-RAW_FORMAT = "babilong-qa6-cl-raw-v1"
+RAW_FORMAT = "babilong-qa6-cl-raw-v2"
 STATUS_FORMAT = "babilong-qa6-cl-status-v1"
 
 
@@ -493,6 +497,11 @@ class UnifiedTrainer:
         loss_count = int(state.get("loss_count", 0))
         final_loss = state.get("final_loss")
         prior_seconds = float(state.get("seconds", 0.0))
+        if start_step > 0 and "supervised_tokens_seen" not in state:
+            raise RuntimeError(
+                "Active task checkpoint is missing supervised-token count"
+            )
+        supervised_tokens_seen = int(state.get("supervised_tokens_seen", 0))
         examples_seen = int(
             state.get("examples_seen", start_step * self.config.slow_batch_size)
         )
@@ -516,45 +525,80 @@ class UnifiedTrainer:
                 if self.bundle.fast_cell is not None
                 else 0
             )
-            step_loss = 0.0
-            fast_examples = 0
-            fast_diagnostics: dict[str, float | int] | None = None
-
-            for micro_start in range(0, len(indices), self.config.microbatch_size):
+            prepared_microbatches: list[tuple[dict[str, Any], int]] = []
+            for micro_start in range(
+                0, len(indices), self.config.microbatch_size
+            ):
                 micro_indices = indices[
                     micro_start : micro_start + self.config.microbatch_size
                 ]
-                batch = self.collator([dataset[index] for index in micro_indices])
+                batch = self.collator(
+                    [dataset[index] for index in micro_indices]
+                )
+                supervised_tokens = shifted_supervised_token_count(
+                    batch["labels_mask"]
+                )
+                prepared_microbatches.append((batch, supervised_tokens))
+            slow_supervised_tokens = sum(
+                count for _, count in prepared_microbatches
+            )
+            if slow_supervised_tokens <= 0:
+                raise RuntimeError("Slow batch contains no supervised tokens")
+
+            step_loss_sum = 0.0
+            fast_examples = 0
+            fast_supervised_tokens = 0
+            fast_diagnostics: dict[str, float | int] | None = None
+
+            for batch, expected_supervised_tokens in prepared_microbatches:
                 batch = _to_device(batch, self.device)
                 with autocast_context(self.config, self.device):
                     output = self.bundle.model(
                         input_ids=batch["input_ids"],
-                        labels=batch["labels"],
-                        labels_mask=batch["labels_mask"],
                         attention_mask=batch["attention_mask"],
                     )
-                    task_loss = output.loss
+                    task_loss = masked_causal_cross_entropy(
+                        output.logits,
+                        batch["labels"],
+                        batch["labels_mask"],
+                    )
+                    if (
+                        task_loss.supervised_tokens
+                        != expected_supervised_tokens
+                    ):
+                        raise RuntimeError(
+                            "Supervised-token count changed after device transfer"
+                        )
                     penalty = (
                         self.strategy.penalty()
                         if self.strategy is not None
-                        else task_loss.new_zeros(())
+                        else output.logits.new_zeros(())
                     )
-                    scaled_loss = (task_loss + penalty) / microbatches_per_slow
+                    scaled_loss = (
+                        task_loss.loss_sum / slow_supervised_tokens
+                        + penalty / microbatches_per_slow
+                    )
                 scaled_loss.backward()
-                step_loss += float(task_loss.detach()) / microbatches_per_slow
+                step_loss_sum += float(task_loss.loss_sum.detach())
 
                 if self.bundle.fast_cell is not None:
-                    fast_examples += len(micro_indices)
+                    fast_examples += int(batch["input_ids"].shape[0])
+                    fast_supervised_tokens += task_loss.supervised_tokens
                     if fast_examples == self.config.fast_batch_size:
+                        if fast_supervised_tokens <= 0:
+                            raise RuntimeError(
+                                "Fast batch contains no supervised tokens"
+                            )
                         fast_diagnostics = self.bundle.fast_cell.apply_fast_update(
                             fast_lr=fast_lr_for_config(self.config),
                             grad_scale=(
-                                self.config.slow_batch_size
-                                / self.config.fast_batch_size
+                                slow_supervised_tokens
+                                / fast_supervised_tokens
                             ),
                             clip_norm=self.config.fast_clip_norm,
                         )
                         fast_examples = 0
+                        fast_supervised_tokens = 0
                     elif fast_examples > self.config.fast_batch_size:
                         raise RuntimeError("Microbatch crossed a FastMem update boundary")
 
@@ -562,10 +606,15 @@ class UnifiedTrainer:
                 actual = (
                     self.bundle.fast_cell.fast_update_attempts - fast_attempts_at_step
                 )
-                if actual != expected_fast_per_step or fast_examples != 0:
+                if (
+                    actual != expected_fast_per_step
+                    or fast_examples != 0
+                    or fast_supervised_tokens != 0
+                ):
                     raise RuntimeError(
                         f"Expected {expected_fast_per_step} FastMem attempts, got {actual}"
                     )
+            step_loss = step_loss_sum / slow_supervised_tokens
             grad_norm = torch.nn.utils.clip_grad_norm_(
                 self.bundle.slow_parameters(),
                 max_norm=self.config.clip_grad_norm,
@@ -574,6 +623,7 @@ class UnifiedTrainer:
                 raise FloatingPointError("Slow gradient norm is non-finite")
             if self.strategy is not None:
                 self.strategy.before_optimizer_step()
+            step_learning_rate = float(self.optimizer.param_groups[0]["lr"])
             self.optimizer.step()
             if self.strategy is not None:
                 self.strategy.after_optimizer_step()
@@ -584,14 +634,16 @@ class UnifiedTrainer:
             loss_count += 1
             final_loss = step_loss
             examples_seen += self.config.slow_batch_size
+            supervised_tokens_seen += slow_supervised_tokens
             cumulative_step = prior_cumulative_steps + task_step + 1
             if (task_step + 1) % self.config.log_interval == 0 or task_step == start_step:
                 self.monitor.training(
                     task=task,
                     loss=step_loss,
-                    lr=float(self.optimizer.param_groups[0]["lr"]),
+                    lr=step_learning_rate,
                     grad_norm=float(grad_norm),
                     examples_seen=examples_seen,
+                    supervised_tokens_seen=supervised_tokens_seen,
                     cumulative_step=cumulative_step,
                     fast=(
                         self.bundle.fast_cell.diagnostics()
@@ -615,11 +667,11 @@ class UnifiedTrainer:
                             "target_steps": target_steps,
                             "cumulative_step": cumulative_step,
                             "loss": step_loss,
-                            "learning_rate": float(
-                                self.optimizer.param_groups[0]["lr"]
-                            ),
+                            "learning_rate": step_learning_rate,
                             "slow_gradient_norm": float(grad_norm),
                             "examples_seen": examples_seen,
+                            "supervised_tokens": slow_supervised_tokens,
+                            "supervised_tokens_seen": supervised_tokens_seen,
                         },
                         sort_keys=True,
                     ),
@@ -637,6 +689,7 @@ class UnifiedTrainer:
                         "loss_count": loss_count,
                         "final_loss": final_loss,
                         "examples_seen": examples_seen,
+                        "supervised_tokens_seen": supervised_tokens_seen,
                         "seconds": prior_seconds + time.time() - started,
                     },
                 )
@@ -674,6 +727,8 @@ class UnifiedTrainer:
             "resume_start_slow_step": start_step,
             "target_slow_steps": target_steps,
             "examples_seen": target_steps * self.config.slow_batch_size,
+            "supervised_tokens_seen": supervised_tokens_seen,
+            "loss_normalization": self.config.loss_normalization,
             "dataset_rows": len(dataset),
             "effective_rows_per_epoch": cursor.effective_rows,
             "dropped_tail_rows_per_epoch": len(dataset) - cursor.effective_rows,

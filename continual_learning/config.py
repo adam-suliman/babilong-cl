@@ -10,7 +10,9 @@ from typing import Any, Mapping, Sequence
 from .util import json_sha256
 
 
-PROTOCOL_VERSION = "babilong-qa6-0k-cl-v2"
+PROTOCOL_VERSION = "babilong-qa6-0k-cl-v3"
+LOSS_NORMALIZATION = "global-supervised-token-mean-per-slow-batch"
+LABEL_MASK_POLICY = "answer-and-eos-next-token-positions-padding-safe"
 CANONICAL_TASKS = ("qa1", "qa2", "qa3", "qa11", "qa12", "qa13")
 MODEL_KEYS = ("gpt2", "base_rmt", "fastmem0", "fastmem")
 CL_METHODS = ("none", "si")
@@ -18,7 +20,7 @@ DEFAULT_DATA_SEED = 481113
 DEFAULT_REPLICATE_SEED = 48
 DEFAULT_ORDER_SEED = 48
 DEFAULT_RESULTS_ROOT = Path("results/babilong_cl")
-DEFAULT_PROTOCOL_PATH = Path(__file__).parent / "configs" / "qa6_0k_v2.json"
+DEFAULT_PROTOCOL_PATH = Path(__file__).parent / "configs" / "qa6_0k_v3.json"
 
 
 def stable_seed(namespace: str, seed: int, key: str) -> int:
@@ -101,6 +103,8 @@ class ExperimentConfig:
     tokenizer: str = "openai-community/gpt2"
     precision: str = "fp32"
     deterministic: bool = True
+    loss_normalization: str = LOSS_NORMALIZATION
+    label_mask_policy: str = LABEL_MASK_POLICY
     slow_steps_per_task: int = 3001
     legacy_configured_iters: int = 3000
     warmup_steps: int = 300
@@ -142,6 +146,14 @@ class ExperimentConfig:
             pass
         if self.precision not in {"fp32", "bf16"}:
             raise ValueError("precision must be fp32 or bf16")
+        if self.loss_normalization != LOSS_NORMALIZATION:
+            raise ValueError(
+                f"loss_normalization must be {LOSS_NORMALIZATION!r}"
+            )
+        if self.label_mask_policy != LABEL_MASK_POLICY:
+            raise ValueError(
+                f"label_mask_policy must be {LABEL_MASK_POLICY!r}"
+            )
         if self.slow_steps_per_task <= 0:
             raise ValueError("slow_steps_per_task must be positive")
         if self.minimum_free_disk_gb < 0:
@@ -190,6 +202,7 @@ class ExperimentConfig:
             / method
             / f"replicate-{self.replicate_seed}"
             / f"order-{self.order_seed}-{self.order_slug}"
+            / f"protocol-{self.protocol_hash[:12]}"
         )
 
     @property
@@ -202,6 +215,7 @@ class ExperimentConfig:
             / method
             / f"replicate-{self.replicate_seed}"
             / f"order-{self.order_seed}-{self.order_slug}"
+            / f"protocol-{self.protocol_hash[:12]}"
         )
 
     @property

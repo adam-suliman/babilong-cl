@@ -20,6 +20,10 @@ from .config import (
 )
 from .data import OfficialCollator
 from .launcher import _take_launchable_assignment
+from .losses import (
+    masked_causal_cross_entropy,
+    shifted_supervised_token_count,
+)
 from .metrics import continual_metrics, decode_generated_answer
 from .models import build_model
 from .reporting import strict_fastmem_claim, write_run_artifacts
@@ -140,7 +144,26 @@ def _gpt2_tiny_model_config() -> GPT2Config:
         eos_token_id=0,
         pad_token_id=0,
         use_cache=False,
+        attn_pdrop=0.0,
+        embd_pdrop=0.0,
+        resid_pdrop=0.0,
     )
+
+
+def _variable_target_records(count: int = 64) -> list[dict]:
+    records = []
+    for index in range(count):
+        target_tokens = [10] if index % 2 == 0 else [10, 11]
+        records.append(
+            {
+                "input_tokens": [2, 3] + ([4] if index % 3 == 0 else []),
+                "question_tokens": [7, 8],
+                "target_tokens": target_tokens,
+                "target_text": "kitchen" if len(target_tokens) == 1 else "kitchen x",
+                "row_index": index,
+            }
+        )
+    return records
 
 
 def test_seed_contract() -> None:
@@ -162,6 +185,9 @@ def test_config_and_collation_contract() -> None:
         restored = ExperimentConfig.from_mapping(payload)
         assert restored.protocol_hash == config.protocol_hash
         assert restored.run_dir == config.run_dir
+        different_microbatch = replace(config, microbatch_size=2)
+        assert different_microbatch.protocol_hash != config.protocol_hash
+        assert different_microbatch.run_dir != config.run_dir
 
     tokenizer = TinyTokenizer()
     collated = OfficialCollator(tokenizer)(
@@ -177,8 +203,171 @@ def test_config_and_collation_contract() -> None:
     )
     assert collated["input_ids"].tolist() == [[2, 3, 7, 8, 1, 10, 0]]
     assert collated["labels_mask"].tolist() == [
-        [False, False, False, False, True, True, True]
+        [False, False, False, False, True, True, False]
     ]
+
+
+def test_token_normalization_and_microbatch_equivalence() -> None:
+    tokenizer = TinyTokenizer()
+    collator = OfficialCollator(tokenizer)
+    records = _variable_target_records()
+    full_batch = collator(records)
+    expected_tokens = 32 * 2 + 32 * 3
+    assert shifted_supervised_token_count(full_batch["labels_mask"]) == expected_tokens
+
+    tiny = _gpt2_tiny_model_config()
+    with tempfile.TemporaryDirectory(
+        prefix="babilong-cl-token-normalization-"
+    ) as temporary:
+        root = Path(temporary)
+        for model_key in ("gpt2", "base_rmt"):
+            config = replace(
+                _tiny_config(root / model_key, model_key),
+                slow_batch_size=64,
+                fast_batch_size=32,
+                microbatch_size=1,
+            )
+            seed_everything(48)
+            initial = build_model(config, tiny_config=tiny)
+            initial_state = copy.deepcopy(initial.model.state_dict())
+
+            reference = build_model(config, tiny_config=tiny)
+            reference.model.load_state_dict(initial_state)
+            reference.model.train()
+            reference_output = reference.model(
+                input_ids=full_batch["input_ids"],
+                labels=full_batch["labels"],
+                labels_mask=full_batch["labels_mask"],
+                attention_mask=full_batch["attention_mask"],
+            )
+            reference_output.loss.backward()
+            reference_gradients = {
+                name: parameter.grad.detach().clone()
+                for name, parameter in reference.slow_named_parameters()
+                if parameter.grad is not None
+            }
+
+            logits_only = build_model(config, tiny_config=tiny)
+            logits_only.model.load_state_dict(initial_state)
+            logits_only.model.train()
+            logits_output = logits_only.model(
+                input_ids=full_batch["input_ids"],
+                attention_mask=full_batch["attention_mask"],
+            )
+            exact_loss = masked_causal_cross_entropy(
+                logits_output.logits,
+                full_batch["labels"],
+                full_batch["labels_mask"],
+            )
+            torch.testing.assert_close(
+                exact_loss.mean,
+                reference_output.loss,
+                rtol=1e-6,
+                atol=1e-7,
+            )
+
+            for microbatch_size in (1, 8, 16, 32):
+                accumulated = build_model(config, tiny_config=tiny)
+                accumulated.model.load_state_dict(initial_state)
+                accumulated.model.train()
+                for start in range(0, len(records), microbatch_size):
+                    batch = collator(records[start : start + microbatch_size])
+                    output = accumulated.model(
+                        input_ids=batch["input_ids"],
+                        attention_mask=batch["attention_mask"],
+                    )
+                    loss = masked_causal_cross_entropy(
+                        output.logits,
+                        batch["labels"],
+                        batch["labels_mask"],
+                    )
+                    (loss.loss_sum / expected_tokens).backward()
+                accumulated_gradients = {
+                    name: parameter.grad.detach().clone()
+                    for name, parameter in accumulated.slow_named_parameters()
+                    if parameter.grad is not None
+                }
+                assert accumulated_gradients.keys() == reference_gradients.keys()
+                for name in reference_gradients:
+                    torch.testing.assert_close(
+                        accumulated_gradients[name],
+                        reference_gradients[name],
+                        rtol=2e-5,
+                        atol=2e-6,
+                        msg=lambda message, name=name: (
+                            f"{model_key} microbatch={microbatch_size} {name}: "
+                            f"{message}"
+                        ),
+                    )
+
+        for model_key in ("fastmem0", "fastmem"):
+            final_states = {}
+            summaries = {}
+            for microbatch_size in (1, 8, 16, 32):
+                config = replace(
+                    _tiny_config(
+                        root / f"{model_key}-{microbatch_size}",
+                        model_key,
+                    ),
+                    slow_batch_size=64,
+                    fast_batch_size=32,
+                    microbatch_size=microbatch_size,
+                    clip_grad_norm=1e6,
+                    fast_clip_norm=1e6,
+                )
+                trainer = UnifiedTrainer(
+                    config=config,
+                    data_manifest={"manifest_sha256": "normalization-smoke"},
+                    tokenizer=tokenizer,
+                    tiny_model_config=tiny,
+                    tensorboard=False,
+                )
+                trainer.scheduler = _task_scheduler(
+                    trainer.optimizer,
+                    learning_rate=float(config.learning_rates["qa1"]),
+                    warmup_steps=0,
+                    total_steps=1,
+                )
+                trainer.bundle.model.train()
+                trainer.bundle.reset_fast_memory()
+                summary = trainer.train_task(
+                    task="qa1",
+                    dataset=records,
+                    cursor=EpochBatchCursor(
+                        dataset_size=len(records),
+                        batch_size=64,
+                        task_seed=config.sampler_seeds["qa1"],
+                    ),
+                    start_step=0,
+                    target_steps=1,
+                )
+                final_states[microbatch_size] = copy.deepcopy(
+                    trainer.bundle.model.state_dict()
+                )
+                summaries[microbatch_size] = summary
+                trainer.monitor.close()
+
+            reference_state = final_states[32]
+            for microbatch_size, state in final_states.items():
+                assert state.keys() == reference_state.keys()
+                for name in state:
+                    torch.testing.assert_close(
+                        state[name],
+                        reference_state[name],
+                        rtol=3e-5,
+                        atol=3e-6,
+                        msg=lambda message, name=name: (
+                            f"{model_key} microbatch={microbatch_size} {name}: "
+                            f"{message}"
+                        ),
+                    )
+                assert summaries[microbatch_size]["supervised_tokens_seen"] == (
+                    expected_tokens
+                )
+                assert summaries[microbatch_size]["fast_update_attempts"] == 2
+                assert summaries[microbatch_size]["fast_updates_applied"] == (
+                    2 if model_key == "fastmem" else 0
+                )
 
 
 def test_metrics() -> None:
@@ -313,12 +502,55 @@ def test_si_equations() -> None:
     total_delta = model.weight.detach() - start
     expected = torch.clamp(path / (total_delta.pow(2) + 0.1), min=0.0)
     strategy.end_task("qa1")
+    consolidated_state = strategy.state_dict()
+    consolidated_model = copy.deepcopy(model.state_dict())
     torch.testing.assert_close(
-        strategy.state_dict()["importance"]["weight"],
+        consolidated_state["importance"]["weight"],
         expected,
         rtol=0,
         atol=1e-7,
     )
+
+    accumulated_gradients = {}
+    for microbatch_count in (1, 8, 32):
+        accumulated_model = VectorModel()
+        accumulated_model.load_state_dict(consolidated_model)
+        accumulated_optimizer = torch.optim.AdamW(
+            accumulated_model.parameters(),
+            lr=0.03,
+            betas=(0.0, 0.0),
+            eps=1e-8,
+            weight_decay=0.0,
+        )
+        accumulated_strategy = SynapticIntelligence(
+            accumulated_model,
+            accumulated_optimizer,
+            config,
+        )
+        accumulated_strategy.load_state_dict(consolidated_state)
+        accumulated_strategy.begin_task("qa2")
+        with torch.no_grad():
+            accumulated_model.weight.add_(torch.tensor([0.15, -0.05]))
+        accumulated_optimizer.zero_grad(set_to_none=True)
+        task_target = torch.tensor([-0.2, 0.3])
+        for _ in range(microbatch_count):
+            task_loss = (
+                accumulated_model.weight - task_target
+            ).pow(2).sum()
+            (
+                task_loss / microbatch_count
+                + accumulated_strategy.penalty() / microbatch_count
+            ).backward()
+        accumulated_gradients[microbatch_count] = (
+            accumulated_model.weight.grad.detach().clone()
+        )
+    for microbatch_count in (8, 32):
+        torch.testing.assert_close(
+            accumulated_gradients[microbatch_count],
+            accumulated_gradients[1],
+            rtol=1e-6,
+            atol=1e-7,
+        )
 
     ordinary = VectorModel()
     controlled = copy.deepcopy(ordinary)
@@ -523,18 +755,16 @@ def test_midtask_resume_equivalence() -> None:
         )
 
         incompatible = replace(interrupted_config, weight_decay=0.02)
-        try:
-            UnifiedTrainer(
-                config=incompatible,
-                data_manifest=manifest,
-                tokenizer=tokenizer,
-                tiny_model_config=tiny,
-                tensorboard=False,
-            ).run(max_tasks=1)
-        except RuntimeError as error:
-            assert "different protocol" in str(error)
-        else:
-            raise AssertionError("Incompatible run directory was not rejected")
+        assert incompatible.run_dir != interrupted_config.run_dir
+        isolated = UnifiedTrainer(
+            config=incompatible,
+            data_manifest=manifest,
+            tokenizer=tokenizer,
+            tiny_model_config=tiny,
+            tensorboard=False,
+        ).run(max_tasks=1)
+        assert isolated["status"] == "partial"
+        assert (incompatible.run_dir / "config.json").is_file()
 
 
 def gpu_smoke(
@@ -641,6 +871,10 @@ def main() -> None:
         ("provenance", verify_provenance),
         ("seed contract", test_seed_contract),
         ("config/collation contract", test_config_and_collation_contract),
+        (
+            "token normalization/microbatch equivalence",
+            test_token_normalization_and_microbatch_equivalence,
+        ),
         ("metrics", test_metrics),
         ("SI GPU placement", test_si_gpu_placement),
         ("SI equations", test_si_equations),

@@ -16,7 +16,7 @@ scheduler restarts at each task boundary.
 
 All conditions share one immutable data manifest.
 
-Protocol-v1 canonical manifest SHA256:
+Canonical data-manifest SHA256:
 `600b4a4791b5d213d56c3226e7553a60ef5401c2a1ed80f40ead439a51722292`.
 
 | Tasks | Training source |
@@ -31,14 +31,19 @@ evaluation. Validation excludes overlaps with both train and public
 evaluation. Source members, scenario selections, file hashes, tokenizer
 revision, and token statistics are recorded.
 
-Serialization and loss masking reproduce the released trainer:
+Serialization reproduces the released trainer:
 
 ```text
 input + question + GEN + target + EOS
 ```
 
-Loss is applied to answer and EOS predictions using the released
-`labels_mask` convention.
+Loss is applied to answer and EOS predictions. The local collator deliberately
+corrects a padding-sensitive boundary in the released trainer: upstream uses
+`mask[-len(target)-2:]`, which includes the EOS input position. That position
+is discarded only when it is the final padded position; in a mixed-length
+batch it instead supervises an unintended EOS-to-padding-EOS prediction. The
+canonical local mask uses `mask[-len(target)-2:-1]`, so every row always has
+exactly `len(target_tokens) + 1` supervised next-token predictions.
 
 Stock GPT-2 is fail-closed at 1,024 positions. In the canonical manifest,
 QA3 has 5,000 source rows, 4,946 fitting rows, and 54 excluded rows. The
@@ -77,6 +82,11 @@ same update attempts without changing active memory.
 - 3,001 slow AdamW steps per task (`3,000` is retained as the historical
   inclusive-iteration configuration).
 - Effective slow batch 64; microbatch 1 by default; full batches only.
+- Cross-entropy is summed over all answer/EOS targets in the 64-example slow
+  batch and divided once by the exact global supervised-token count.
+- Gradient accumulation is therefore mathematically invariant to microbatch
+  grouping. FastMem uses the same principle separately for each 32-example
+  manual update.
 - AdamW weight decay `0.01`, gradient clipping `1.0`.
 - Learning rate `3e-5` for QA3 and `1e-5` for all other tasks.
 - Linear task-local scheduler with 300 warmup steps.
@@ -137,4 +147,13 @@ slow step. The final checkpoint is a hardlink to the rolling state when the
 filesystem supports it.
 
 JSON and CSV are authoritative. TensorBoard and generated figures are
-monitoring and presentation layers.
+monitoring and presentation layers. The logged training LR is the value used
+by the optimizer update at that step, before advancing the scheduler.
+
+## Protocol Versioning
+
+The corrected loss and mask policy are protocol
+`babilong-qa6-0k-cl-v3`. Run and TensorBoard paths include the protocol hash.
+Checkpoints from earlier protocols cannot be resumed by v3. SI coefficients
+selected under an earlier loss/mask policy must be recalibrated; an explicitly
+provided coefficient remains an explicitly fixed, untuned condition.

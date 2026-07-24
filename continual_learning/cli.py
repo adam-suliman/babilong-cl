@@ -107,6 +107,8 @@ def _validate_selected_si(
         "learning_rates",
         "weight_decay",
         "clip_grad_norm",
+        "label_mask_policy",
+        "loss_normalization",
         "microbatch_size",
         "slow_batch_size",
         "data_seed",

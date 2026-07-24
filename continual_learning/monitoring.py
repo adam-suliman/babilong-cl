@@ -44,6 +44,7 @@ class ExperimentMonitor:
         lr: float,
         grad_norm: float,
         examples_seen: int,
+        supervised_tokens_seen: int,
         cumulative_step: int,
         fast: Mapping[str, float | int] | None,
         si: Mapping[str, Any] | None,
@@ -52,6 +53,11 @@ class ExperimentMonitor:
         self.scalar("train/lr", lr, cumulative_step)
         self.scalar("train/slow_gradient_norm", grad_norm, cumulative_step)
         self.scalar("train/examples_seen", examples_seen, cumulative_step)
+        self.scalar(
+            "train/supervised_tokens_seen",
+            supervised_tokens_seen,
+            cumulative_step,
+        )
         self.scalar(f"train_by_task/{task}/loss", loss, cumulative_step)
         if fast:
             for key, value in fast.items():

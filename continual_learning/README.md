@@ -41,7 +41,8 @@ smokes and development.
 
 ## Seed Contract
 
-- `data_seed=481113` fixes the datasets and is rejected if changed in protocol v2.
+- `data_seed=481113` fixes the datasets and is rejected if changed in the
+  canonical protocol.
 - `order_seed` deterministically selects the six-task permutation. The same
   value gives every model the same order.
 - `replicate_seed` controls model initialization and training randomness.
@@ -107,8 +108,12 @@ GPU_IDS="0" JOBS_PER_GPU=4 MICROBATCH_SIZE=8 \
   --order-seeds 48
 ```
 
-Use the same microbatch setting for every compared condition and record it as
-part of the protocol. Values must divide both 32 and 64.
+Protocol v3 uses one global supervised-token denominator for every 64-example
+slow batch, so microbatch sizes `1`, `8`, `16`, and `32` produce the same
+mathematical slow gradient. FastMem also normalizes each 32-example fast
+update by its exact supervised-token count. Floating-point operation ordering
+can still introduce negligible numerical differences. Values must divide
+both 32 and 64.
 
 Multiple replicates and orders can share one GPU:
 
@@ -144,15 +149,16 @@ results/babilong_cl/
   data/qa6-0k/data-seed-481113/
   calibration/si/
   runs/<architecture>/<method>/replicate-<seed>/order-<seed>-<tasks>/
-    config.json
-    raw.json
-    summary.md
-    status.json
-    checkpoints/{latest,final}.pt
-    tables/
-    plots/
+    protocol-<hash>/
+      config.json
+      raw.json
+      summary.md
+      status.json
+      checkpoints/{latest,final}.pt
+      tables/
+      plots/
   references/<architecture>/<method>/replicate-<seed>/<identity>/<task>/
-  tensorboard/<architecture>/<method>/replicate-<seed>/<order>/
+  tensorboard/<architecture>/<method>/replicate-<seed>/<order>/protocol-<hash>/
   suites/<suite-id>/
   aggregates/
 ```
@@ -177,5 +183,5 @@ python -m continual_learning suite --help
 ```
 
 The data layer exposes a provider interface for a future PG19/noisy condition.
-Protocol v1 deliberately fails instead of silently generating noise,
+The canonical protocol deliberately fails instead of silently generating noise,
 truncating examples, or resizing GPT-2 positions.

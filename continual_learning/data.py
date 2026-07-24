@@ -601,17 +601,32 @@ class OfficialCollator:
         attention_mask = [torch.ones_like(ids, dtype=torch.bool) for ids in input_ids]
         labels_mask = [torch.zeros_like(ids, dtype=torch.bool) for ids in input_ids]
         for mask, target in zip(labels_mask, targets):
-            mask[-len(target) - 2 :] = True
+            # Mark input positions whose next-token labels are answer + EOS.
+            # Excluding the EOS input position keeps right padding from adding
+            # a spurious EOS-to-padding prediction for shorter rows.
+            mask[-len(target) - 2 : -1] = True
         padded_input = pad_sequence(
             input_ids, batch_first=True, padding_value=self.pad_token
         )
         padded_generate = pad_sequence(
             generate_ids, batch_first=True, padding_value=self.pad_token
         )
+        padded_labels_mask = pad_sequence(
+            labels_mask, batch_first=True, padding_value=0
+        )
+        expected_supervised_tokens = sum(len(target) + 1 for target in targets)
+        actual_supervised_tokens = int(
+            padded_labels_mask[..., :-1].sum().item()
+        )
+        if actual_supervised_tokens != expected_supervised_tokens:
+            raise RuntimeError(
+                "Answer/EOS label mask changed under padding: "
+                f"{actual_supervised_tokens} != {expected_supervised_tokens}"
+            )
         return {
             "input_ids": padded_input,
             "labels": padded_input,
-            "labels_mask": pad_sequence(labels_mask, batch_first=True, padding_value=0),
+            "labels_mask": padded_labels_mask,
             "attention_mask": pad_sequence(
                 attention_mask, batch_first=True, padding_value=0
             ),
