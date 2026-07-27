@@ -169,7 +169,8 @@ def launch_suite(
         base_config.minimum_free_disk_gb,
         5.0 + sum(active_atomic_peaks),
     )
-    if free_disk_gb < estimated_required_gb:
+    disk_preflight_passed = free_disk_gb >= estimated_required_gb
+    if not disk_preflight_passed and not dry_run:
         raise RuntimeError(
             f"Suite disk preflight failed: {free_disk_gb:.1f} GB free, "
             f"{estimated_required_gb:.1f} GB required"
@@ -189,6 +190,7 @@ def launch_suite(
         "status": "planned" if dry_run else "running",
         "free_disk_gb": free_disk_gb,
         "estimated_required_gb": estimated_required_gb,
+        "disk_preflight_passed": disk_preflight_passed,
         "checkpoint_estimates": checkpoint_estimates,
         "started_at_unix": time.time(),
     }

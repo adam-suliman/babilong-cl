@@ -38,8 +38,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 DEVICE="${DEVICE:-cuda:0}"
+CONFIG="${CONFIG:-$ROOT/continual_learning/configs/qa6_0k_ar_analog_v4.json}"
 
 exec "$PYTHON" -m continual_learning run \
+  --config "$CONFIG" \
   --model "$MODEL" \
   --cl-method "$METHOD" \
   --replicate-seed "$REPLICATE_SEED" \

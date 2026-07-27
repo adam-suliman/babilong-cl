@@ -5,9 +5,11 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 cd "$ROOT"
 PYTHON="${PYTHON:-$ROOT/.venv/bin/python}"
 PORT="${PORT:-6006}"
+RESULTS_ROOT="${RESULTS_ROOT:-results/babilong_cl_v4_ar}"
+TENSORBOARD_DIR="${TENSORBOARD_DIR:-$RESULTS_ROOT/tensorboard}"
 
 ARGS=(
-  --logdir results/babilong_cl/tensorboard
+  --logdir "$TENSORBOARD_DIR"
   --host 0.0.0.0
 )
 PORT_PROVIDED=false

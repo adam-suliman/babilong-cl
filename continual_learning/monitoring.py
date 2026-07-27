@@ -92,7 +92,10 @@ class ExperimentMonitor:
             "bwt": "retention/bwt",
         }
         for source, target in names.items():
-            self.scalar(target, stage_metrics.get(source), cumulative_step)
+            value = stage_metrics.get(source)
+            self.scalar(target, value, cumulative_step)
+            family, metric = target.split("/", 1)
+            self.scalar(f"{family}_by_stage/{metric}", value, stage_index)
         self.scalar("stage/index", stage_index, cumulative_step)
 
     def references(
@@ -110,6 +113,21 @@ class ExperimentMonitor:
             self.scalar("plasticity/single_task_reference", references.get(task), step)
             self.scalar("plasticity/intransigence", gaps.get(task), step)
             self.scalar("plasticity/reference_ratio", ratios.get(task), step)
+            self.scalar(
+                "plasticity_by_stage/single_task_reference",
+                references.get(task),
+                stage_index,
+            )
+            self.scalar(
+                "plasticity_by_stage/intransigence",
+                gaps.get(task),
+                stage_index,
+            )
+            self.scalar(
+                "plasticity_by_stage/reference_ratio",
+                ratios.get(task),
+                stage_index,
+            )
 
     def matrix_text(
         self,

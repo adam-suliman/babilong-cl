@@ -10,9 +10,10 @@ from typing import Any, Mapping, Sequence
 from .util import json_sha256
 
 
-PROTOCOL_VERSION = "babilong-qa6-0k-cl-v3"
+PROTOCOL_VERSION = "babilong-qa6-0k-cl-v4-ar-cadence"
 LOSS_NORMALIZATION = "global-supervised-token-mean-per-slow-batch"
 LABEL_MASK_POLICY = "answer-and-eos-next-token-positions-padding-safe"
+BUDGET_MODES = ("fixed_slow_steps", "fixed_train_minibatches")
 CANONICAL_TASKS = ("qa1", "qa2", "qa3", "qa11", "qa12", "qa13")
 MODEL_KEYS = ("gpt2", "base_rmt", "fastmem0", "fastmem")
 CL_METHODS = ("none", "si")
@@ -20,7 +21,9 @@ DEFAULT_DATA_SEED = 481113
 DEFAULT_REPLICATE_SEED = 48
 DEFAULT_ORDER_SEED = 48
 DEFAULT_RESULTS_ROOT = Path("results/babilong_cl")
-DEFAULT_PROTOCOL_PATH = Path(__file__).parent / "configs" / "qa6_0k_v3.json"
+DEFAULT_PROTOCOL_PATH = (
+    Path(__file__).parent / "configs" / "qa6_0k_ar_analog_v4.json"
+)
 
 
 def stable_seed(namespace: str, seed: int, key: str) -> int:
@@ -87,6 +90,7 @@ def float_slug(value: float) -> str:
 @dataclass(frozen=True)
 class ExperimentConfig:
     model: str
+    protocol_version: str = PROTOCOL_VERSION
     cl_method: str = "none"
     si_lambda: float | None = None
     si_epsilon: float = 0.1
@@ -105,9 +109,14 @@ class ExperimentConfig:
     deterministic: bool = True
     loss_normalization: str = LOSS_NORMALIZATION
     label_mask_policy: str = LABEL_MASK_POLICY
-    slow_steps_per_task: int = 3001
-    legacy_configured_iters: int = 3000
-    warmup_steps: int = 300
+    training_budget_mode: str = "fixed_slow_steps"
+    train_minibatch_size: int = 32
+    train_minibatches_per_task: int | None = None
+    fastmem_slow_update_freq: int = 2
+    warmup_ratio: float | None = None
+    slow_steps_per_task: int | None = 3001
+    legacy_configured_iters: int | None = 3000
+    warmup_steps: int | None = 300
     learning_rates: Mapping[str, float] = field(
         default_factory=lambda: {
             task: 3e-5 if task == "qa3" else 1e-5 for task in CANONICAL_TASKS
@@ -116,7 +125,7 @@ class ExperimentConfig:
     weight_decay: float = 0.01
     clip_grad_norm: float = 1.0
     microbatch_size: int = 1
-    slow_batch_size: int = 64
+    slow_batch_size: int | None = 64
     fast_batch_size: int = 32
     fast_lr: float = 0.005
     fast_clip_norm: float = 1.0
@@ -133,6 +142,14 @@ class ExperimentConfig:
     device: str = "cuda"
 
     def __post_init__(self) -> None:
+        if (
+            self.protocol_version == PROTOCOL_VERSION
+            and self.data_seed != DEFAULT_DATA_SEED
+        ):
+            raise ValueError(
+                f"Canonical protocol {PROTOCOL_VERSION} requires "
+                f"data_seed={DEFAULT_DATA_SEED}"
+            )
         if self.model not in MODEL_KEYS:
             raise ValueError(f"model must be one of {MODEL_KEYS}")
         if self.cl_method not in CL_METHODS:
@@ -154,17 +171,45 @@ class ExperimentConfig:
             raise ValueError(
                 f"label_mask_policy must be {LABEL_MASK_POLICY!r}"
             )
-        if self.slow_steps_per_task <= 0:
-            raise ValueError("slow_steps_per_task must be positive")
+        if self.training_budget_mode not in BUDGET_MODES:
+            raise ValueError(f"training_budget_mode must be one of {BUDGET_MODES}")
+        if self.train_minibatch_size <= 0:
+            raise ValueError("train_minibatch_size must be positive")
+        if self.fastmem_slow_update_freq <= 0:
+            raise ValueError("fastmem_slow_update_freq must be positive")
+        if self.training_budget_mode == "fixed_slow_steps":
+            if self.slow_steps_per_task is None or self.slow_steps_per_task <= 0:
+                raise ValueError("slow_steps_per_task must be positive")
+            if self.slow_batch_size is None or self.slow_batch_size <= 0:
+                raise ValueError("slow_batch_size must be positive")
+            if self.warmup_steps is None or self.warmup_steps < 0:
+                raise ValueError("warmup_steps must be nonnegative")
+        else:
+            if (
+                self.train_minibatches_per_task is None
+                or self.train_minibatches_per_task <= 0
+            ):
+                raise ValueError("train_minibatches_per_task must be positive")
+            if self.train_minibatches_per_task % self.fastmem_slow_update_freq:
+                raise ValueError(
+                    "train_minibatches_per_task must divide evenly by "
+                    "fastmem_slow_update_freq"
+                )
+            if self.warmup_ratio is None or not 0.0 <= self.warmup_ratio < 1.0:
+                raise ValueError("warmup_ratio must be in [0, 1)")
+            if self.fast_batch_size != self.train_minibatch_size:
+                raise ValueError(
+                    "FastMem update batches must equal physical train minibatches"
+                )
         if self.minimum_free_disk_gb < 0:
             raise ValueError("minimum_free_disk_gb must be nonnegative")
         if self.microbatch_size <= 0:
             raise ValueError("microbatch_size must be positive")
-        if self.slow_batch_size % self.microbatch_size:
+        if self.resolved_slow_batch_size % self.microbatch_size:
             raise ValueError("microbatch_size must divide slow_batch_size")
         if self.fast_batch_size % self.microbatch_size:
             raise ValueError("microbatch_size must divide fast_batch_size")
-        if self.slow_batch_size % self.fast_batch_size:
+        if self.resolved_slow_batch_size % self.fast_batch_size:
             raise ValueError("fast_batch_size must divide slow_batch_size")
         if tuple(sorted(self.learning_rates)) != tuple(sorted(CANONICAL_TASKS)):
             raise ValueError("learning_rates must define every canonical task exactly once")
@@ -183,6 +228,49 @@ class ExperimentConfig:
     @property
     def sampler_seeds(self) -> dict[str, int]:
         return task_sampler_seeds(self.replicate_seed)
+
+    @property
+    def slow_update_freq(self) -> int:
+        if self.training_budget_mode == "fixed_train_minibatches" and self.model in {
+            "fastmem0",
+            "fastmem",
+        }:
+            return self.fastmem_slow_update_freq
+        return 1
+
+    @property
+    def resolved_slow_steps_per_task(self) -> int:
+        if self.training_budget_mode == "fixed_train_minibatches":
+            assert self.train_minibatches_per_task is not None
+            return self.train_minibatches_per_task // self.slow_update_freq
+        assert self.slow_steps_per_task is not None
+        return self.slow_steps_per_task
+
+    @property
+    def resolved_slow_batch_size(self) -> int:
+        if self.training_budget_mode == "fixed_train_minibatches":
+            return self.train_minibatch_size * self.slow_update_freq
+        assert self.slow_batch_size is not None
+        return self.slow_batch_size
+
+    @property
+    def resolved_warmup_steps(self) -> int:
+        if self.training_budget_mode == "fixed_train_minibatches":
+            assert self.warmup_ratio is not None
+            return int(round(self.resolved_slow_steps_per_task * self.warmup_ratio))
+        assert self.warmup_steps is not None
+        return self.warmup_steps
+
+    @property
+    def resolved_train_minibatches_per_task(self) -> int:
+        if self.training_budget_mode == "fixed_train_minibatches":
+            assert self.train_minibatches_per_task is not None
+            return self.train_minibatches_per_task
+        return self.resolved_slow_steps_per_task
+
+    @property
+    def training_examples_per_task(self) -> int:
+        return self.resolved_slow_steps_per_task * self.resolved_slow_batch_size
 
     @property
     def architecture_and_method(self) -> tuple[str, str]:
@@ -234,7 +322,7 @@ class ExperimentConfig:
         payload = asdict(self)
         payload["task_order"] = list(self.resolved_order)
         payload["task_sampler_seeds"] = self.sampler_seeds
-        payload["protocol_version"] = PROTOCOL_VERSION
+        payload["protocol_version"] = self.protocol_version
         payload["architecture"] = self.architecture_and_method[0]
         payload["method"] = self.architecture_and_method[1]
         payload.pop("results_root", None)
@@ -245,6 +333,22 @@ class ExperimentConfig:
         payload.pop("checkpoint_interval", None)
         payload.pop("log_interval", None)
         payload.pop("minimum_free_disk_gb", None)
+        if self.training_budget_mode == "fixed_slow_steps":
+            for field_name in (
+                "training_budget_mode",
+                "train_minibatch_size",
+                "train_minibatches_per_task",
+                "fastmem_slow_update_freq",
+                "warmup_ratio",
+            ):
+                payload.pop(field_name, None)
+        else:
+            for field_name in (
+                "slow_steps_per_task",
+                "slow_batch_size",
+                "warmup_steps",
+            ):
+                payload.pop(field_name, None)
         return payload
 
     @property
@@ -255,25 +359,41 @@ class ExperimentConfig:
         payload = asdict(self)
         payload["task_order"] = list(self.resolved_order)
         payload["task_sampler_seeds"] = self.sampler_seeds
-        payload["protocol_version"] = PROTOCOL_VERSION
+        payload["protocol_version"] = self.protocol_version
         payload["protocol_hash"] = self.protocol_hash
         payload["architecture"] = self.architecture_and_method[0]
         payload["method"] = self.architecture_and_method[1]
         payload["run_dir"] = str(self.run_dir)
         payload["tensorboard_dir"] = str(self.tensorboard_dir)
         payload["data_dir"] = str(self.resolved_data_dir)
+        payload["slow_update_freq"] = self.slow_update_freq
+        payload["resolved_slow_steps_per_task"] = self.resolved_slow_steps_per_task
+        payload["resolved_slow_batch_size"] = self.resolved_slow_batch_size
+        payload["resolved_warmup_steps"] = self.resolved_warmup_steps
+        payload["resolved_train_minibatches_per_task"] = (
+            self.resolved_train_minibatches_per_task
+        )
+        payload["training_examples_per_task"] = self.training_examples_per_task
         return payload
 
     @classmethod
     def from_mapping(cls, payload: Mapping[str, Any]) -> "ExperimentConfig":
         values = dict(payload)
-        values.pop("protocol_version", None)
         values.pop("protocol_hash", None)
         values.pop("run_dir", None)
         values.pop("tensorboard_dir", None)
         values.pop("task_sampler_seeds", None)
         values.pop("architecture", None)
         values.pop("method", None)
+        for field_name in (
+            "slow_update_freq",
+            "resolved_slow_steps_per_task",
+            "resolved_slow_batch_size",
+            "resolved_warmup_steps",
+            "resolved_train_minibatches_per_task",
+            "training_examples_per_task",
+        ):
+            values.pop(field_name, None)
         if values.get("task_order") is not None:
             values["task_order"] = tuple(values["task_order"])
         return cls(**values)

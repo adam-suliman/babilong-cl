@@ -1,4 +1,4 @@
-# QA6 0k Protocol
+# QA6 0k Incremental-AR-Cadence Protocol
 
 ## Scope
 
@@ -72,31 +72,43 @@ parameter excluded from AdamW. Training uses:
 fast + initializer - initializer.detach()
 ```
 
-The active state receives two manual 32-example updates per 64-example slow
-step. It resets from the learned initializer at epoch, task, and evaluation
-boundaries. Evaluation uses the learned initializer. `fastmem0` makes the
-same update attempts without changing active memory.
+The physical training minibatch is 32 examples. FastMem receives one manual
+update after each physical minibatch and accumulates slow gradients over two
+minibatches before AdamW. It therefore receives two fast updates per
+64-example slow step. The active state resets from the learned initializer at
+epoch, task, and evaluation boundaries. Evaluation uses the learned
+initializer. `fastmem0` makes the same update attempts without changing active
+memory.
 
 ## Optimization
 
-- 3,001 slow AdamW steps per task (`3,000` is retained as the historical
-  inclusive-iteration configuration).
-- Effective slow batch 64; microbatch 1 by default; full batches only.
-- Cross-entropy is summed over all answer/EOS targets in the 64-example slow
+- Every condition processes exactly 6,002 physical 32-example minibatches and
+  192,064 examples per task.
+- GPT-2, GPT-2+SI, and Base RMT use `slow_update_freq=1`: 6,002 AdamW steps
+  with effective slow batch 32.
+- FastMem and FastMem0 use `slow_update_freq=2`: 3,001 AdamW steps with
+  effective slow batch 64 and 6,002 fast-update attempts.
+- This matches the paper's incremental-AR training semantics: equal epochs,
+  examples, and physical minibatches, with slow gradients accumulated and
+  averaged over two minibatches only for FastMem.
+- Cross-entropy is summed over all answer/EOS targets in each effective slow
   batch and divided once by the exact global supervised-token count.
 - Gradient accumulation is therefore mathematically invariant to microbatch
   grouping. FastMem uses the same principle separately for each 32-example
   manual update.
 - AdamW weight decay `0.01`, gradient clipping `1.0`.
 - Learning rate `3e-5` for QA3 and `1e-5` for all other tasks.
-- Linear task-local scheduler with 300 warmup steps.
+- Linear task-local scheduler with 10% warmup: 600 steps for the ordinary
+  conditions and 300 for FastMem/FastMem0.
 - FP32 default.
 - Persistent model, learned memory, AdamW moments, RNG, and cumulative
   counters.
 
 Task data are reshuffled deterministically each epoch. Tail rows that do not
-form a full 64-example batch are dropped for that epoch. Runs record source,
-fitting, effective, and dropped row counts.
+form a complete effective slow batch are dropped for that epoch: 32 examples
+for GPT-2/SI/Base RMT and 64 for FastMem/FastMem0. The resulting retained rows
+are identical here because every fitting-row count rounds to the same multiple
+of 64. Runs record source, fitting, effective, and dropped row counts.
 
 ## SI Baseline
 
@@ -135,7 +147,9 @@ data hash, and protocol; task-order sweeps reuse them.
 
 FastMem-specific claims are allowed only when nonzero FastMem beats both Base
 RMT and `fastmem0` with matched backbone, memory size, data, seed, order,
-precision, batch policy, budgets, and optimizer-step counts.
+precision, physical minibatches, examples, and the declared cadence. Slow
+optimizer-step counts intentionally differ from Base RMT and must be reported.
+Beating FastMem0 is required to attribute a gain to the nonzero fast update.
 
 ## Checkpointing
 
@@ -152,8 +166,10 @@ by the optimizer update at that step, before advancing the scheduler.
 
 ## Protocol Versioning
 
-The corrected loss and mask policy are protocol
-`babilong-qa6-0k-cl-v3`. Run and TensorBoard paths include the protocol hash.
-Checkpoints from earlier protocols cannot be resumed by v3. SI coefficients
-selected under an earlier loss/mask policy must be recalibrated; an explicitly
-provided coefficient remains an explicitly fixed, untuned condition.
+The incremental-AR cadence is protocol
+`babilong-qa6-0k-cl-v4-ar-cadence`. The completed equal-slow-step experiment
+remains protocol `babilong-qa6-0k-cl-v3`; its config and artifacts are not
+rewritten. Run and TensorBoard paths include the protocol hash, so checkpoints
+cannot cross protocols. An explicitly supplied SI coefficient is recorded as
+a fixed, untuned condition unless a matching v4 private-validation selection
+exists.

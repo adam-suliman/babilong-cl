@@ -24,6 +24,11 @@ FASTMEM_MATCH_FIELDS = (
     "deterministic",
     "label_mask_policy",
     "loss_normalization",
+    "training_budget_mode",
+    "train_minibatch_size",
+    "train_minibatches_per_task",
+    "fastmem_slow_update_freq",
+    "warmup_ratio",
     "slow_steps_per_task",
     "warmup_steps",
     "learning_rates",
@@ -135,6 +140,7 @@ def write_run_artifacts(raw: Mapping[str, Any], run_dir: str | Path) -> None:
     lines.extend(
         [
             f"- Slow optimizer steps: `{raw['cumulative_slow_steps']}`",
+            f"- Physical train minibatches: `{raw.get('cumulative_train_minibatches', 'n/a')}`",
             f"- Fast-update attempts: `{raw['fast_update_attempts']}`",
             f"- Fast updates applied: `{raw['fast_updates_applied']}`",
             "",
@@ -284,6 +290,9 @@ def strict_fastmem_claim(
     if not required.issubset(by_model):
         return {"allowed": False, "reason": "matched method-control triad is incomplete"}
     base_config = by_model["base_rmt"]["config"]
+    ar_cadence = (
+        base_config.get("training_budget_mode") == "fixed_train_minibatches"
+    )
     mismatches = []
     for model in ("fastmem0", "fastmem"):
         config = by_model[model]["config"]
@@ -294,39 +303,36 @@ def strict_fastmem_claim(
             "data_manifest_sha256"
         ]:
             mismatches.append(f"{model}:data_manifest_sha256")
-        if by_model[model].get("cumulative_slow_steps") != by_model[
-            "base_rmt"
-        ].get("cumulative_slow_steps"):
+        if (
+            not ar_cadence
+            and by_model[model].get("cumulative_slow_steps")
+            != by_model["base_rmt"].get("cumulative_slow_steps")
+        ):
             mismatches.append(f"{model}:cumulative_slow_steps")
+        train_keys = [
+            "task",
+            "task_sampler_seed",
+            "examples_seen",
+            "supervised_tokens_seen",
+            "dataset_rows",
+            "effective_rows_per_epoch",
+            "dropped_tail_rows_per_epoch",
+        ]
+        if ar_cadence:
+            train_keys.append("train_minibatches")
+        else:
+            train_keys.append("slow_steps")
         base_train = [
             {
                 key: stage.get(key)
-                for key in (
-                    "task",
-                    "task_sampler_seed",
-                    "slow_steps",
-                    "examples_seen",
-                    "supervised_tokens_seen",
-                    "dataset_rows",
-                    "effective_rows_per_epoch",
-                    "dropped_tail_rows_per_epoch",
-                )
+                for key in train_keys
             }
             for stage in by_model["base_rmt"].get("train_tasks", [])
         ]
         model_train = [
             {
                 key: stage.get(key)
-                for key in (
-                    "task",
-                    "task_sampler_seed",
-                    "slow_steps",
-                    "examples_seen",
-                    "supervised_tokens_seen",
-                    "dataset_rows",
-                    "effective_rows_per_epoch",
-                    "dropped_tail_rows_per_epoch",
-                )
+                for key in train_keys
             }
             for stage in by_model[model].get("train_tasks", [])
         ]
@@ -335,11 +341,37 @@ def strict_fastmem_claim(
     for model in required:
         if by_model[model].get("status") != "complete":
             mismatches.append(f"{model}:status")
-    expected_attempts = (
-        int(by_model["fastmem"]["cumulative_slow_steps"])
-        * int(base_config["slow_batch_size"])
-        // int(base_config["fast_batch_size"])
-    )
+    if ar_cadence:
+        task_count = len(by_model["base_rmt"].get("train_tasks", []))
+        train_minibatches = int(base_config["train_minibatches_per_task"])
+        expected_total_minibatches = task_count * train_minibatches
+        expected_base_steps = expected_total_minibatches
+        expected_fast_steps = (
+            expected_total_minibatches
+            // int(base_config["fastmem_slow_update_freq"])
+        )
+        if by_model["base_rmt"].get("cumulative_slow_steps") != expected_base_steps:
+            mismatches.append("base_rmt:cumulative_slow_steps")
+        if (
+            by_model["base_rmt"].get("cumulative_train_minibatches")
+            != expected_total_minibatches
+        ):
+            mismatches.append("base_rmt:cumulative_train_minibatches")
+        for model in ("fastmem0", "fastmem"):
+            if by_model[model].get("cumulative_slow_steps") != expected_fast_steps:
+                mismatches.append(f"{model}:cumulative_slow_steps")
+            if (
+                by_model[model].get("cumulative_train_minibatches")
+                != expected_total_minibatches
+            ):
+                mismatches.append(f"{model}:cumulative_train_minibatches")
+        expected_attempts = expected_total_minibatches
+    else:
+        expected_attempts = (
+            int(by_model["fastmem"]["cumulative_slow_steps"])
+            * int(base_config["slow_batch_size"])
+            // int(base_config["fast_batch_size"])
+        )
     if by_model["fastmem"].get("fast_update_attempts") != expected_attempts:
         mismatches.append("fastmem:fast_update_attempts")
     if by_model["fastmem0"].get("fast_update_attempts") != expected_attempts:
@@ -365,7 +397,12 @@ def strict_fastmem_claim(
         "metric": metric,
         "scores": scores,
         "reason": (
-            "nonzero FastMem beats both matched controls"
+            (
+                "nonzero FastMem beats both controls at matched sample exposure "
+                "under the declared incremental-AR cadence"
+                if ar_cadence
+                else "nonzero FastMem beats both matched controls"
+            )
             if scores["fastmem"] > scores["base_rmt"]
             and scores["fastmem"] > scores["fastmem0"]
             else "nonzero FastMem does not beat both matched controls"

@@ -233,6 +233,7 @@ class UnifiedTrainer:
             "train_tasks": [],
             "predictions": {},
             "cumulative_slow_steps": 0,
+            "cumulative_train_minibatches": 0,
             "fast_update_attempts": 0,
             "fast_updates_applied": 0,
             "references": None,
@@ -331,9 +332,12 @@ class UnifiedTrainer:
             for stage_index in range(stage_start, stop_stage):
                 task = order[stage_index]
                 task_limit = (
-                    self.config.slow_steps_per_task
+                    self.config.resolved_slow_steps_per_task
                     if max_steps_per_task is None
-                    else min(self.config.slow_steps_per_task, max_steps_per_task)
+                    else min(
+                        self.config.resolved_slow_steps_per_task,
+                        max_steps_per_task,
+                    )
                 )
                 dataset = self._dataset("train", task)
                 print(
@@ -359,13 +363,16 @@ class UnifiedTrainer:
                 else:
                     cursor = EpochBatchCursor(
                         dataset_size=len(dataset),
-                        batch_size=self.config.slow_batch_size,
+                        batch_size=self.config.resolved_slow_batch_size,
                         task_seed=self.config.sampler_seeds[task],
                     )
                 self.scheduler = _task_scheduler(
                     self.optimizer,
                     learning_rate=float(self.config.learning_rates[task]),
-                    warmup_steps=min(self.config.warmup_steps, task_limit),
+                    warmup_steps=min(
+                        self.config.resolved_warmup_steps,
+                        task_limit,
+                    ),
                     total_steps=task_limit,
                 )
                 if restored_scheduler_state is not None and stage_index == stage_start:
@@ -402,6 +409,9 @@ class UnifiedTrainer:
                     train_summary["si_end_task"] = self.strategy.end_task(task)
                 raw["train_tasks"].append(train_summary)
                 raw["cumulative_slow_steps"] += int(task_limit)
+                raw["cumulative_train_minibatches"] += int(
+                    train_summary["train_minibatches"]
+                )
                 raw["fast_update_attempts"] += int(
                     train_summary["fast_update_attempts"]
                 )
@@ -503,16 +513,23 @@ class UnifiedTrainer:
             )
         supervised_tokens_seen = int(state.get("supervised_tokens_seen", 0))
         examples_seen = int(
-            state.get("examples_seen", start_step * self.config.slow_batch_size)
+            state.get(
+                "examples_seen",
+                start_step * self.config.resolved_slow_batch_size,
+            )
         )
         if loss_count != start_step:
             raise RuntimeError(
                 f"Training accumulator step mismatch: {loss_count} != {start_step}"
             )
-        if examples_seen != start_step * self.config.slow_batch_size:
+        if examples_seen != start_step * self.config.resolved_slow_batch_size:
             raise RuntimeError("Training accumulator example count mismatch")
-        microbatches_per_slow = self.config.slow_batch_size // self.config.microbatch_size
-        expected_fast_per_step = self.config.slow_batch_size // self.config.fast_batch_size
+        microbatches_per_slow = (
+            self.config.resolved_slow_batch_size // self.config.microbatch_size
+        )
+        expected_fast_per_step = (
+            self.config.resolved_slow_batch_size // self.config.fast_batch_size
+        )
         self.optimizer.zero_grad(set_to_none=True)
         started = time.time()
 
@@ -633,7 +650,7 @@ class UnifiedTrainer:
             loss_sum += step_loss
             loss_count += 1
             final_loss = step_loss
-            examples_seen += self.config.slow_batch_size
+            examples_seen += self.config.resolved_slow_batch_size
             supervised_tokens_seen += slow_supervised_tokens
             cumulative_step = prior_cumulative_steps + task_step + 1
             if (task_step + 1) % self.config.log_interval == 0 or task_step == start_step:
@@ -726,7 +743,11 @@ class UnifiedTrainer:
             "executed_slow_steps_this_process": target_steps - start_step,
             "resume_start_slow_step": start_step,
             "target_slow_steps": target_steps,
-            "examples_seen": target_steps * self.config.slow_batch_size,
+            "slow_update_freq": self.config.slow_update_freq,
+            "train_minibatch_size": self.config.train_minibatch_size,
+            "train_minibatches": target_steps * self.config.slow_update_freq,
+            "effective_slow_batch_size": self.config.resolved_slow_batch_size,
+            "examples_seen": target_steps * self.config.resolved_slow_batch_size,
             "supervised_tokens_seen": supervised_tokens_seen,
             "loss_normalization": self.config.loss_normalization,
             "dataset_rows": len(dataset),
@@ -853,7 +874,7 @@ class UnifiedTrainer:
             raw["compare_answers_matrix"], self.config.resolved_order
         )
         stage_metrics = compare_metrics["stagewise"][row_index]
-        cumulative = row_index * self.config.slow_steps_per_task
+        cumulative = row_index * self.config.resolved_slow_steps_per_task
         self.monitor.stage(
             stage_index=row_index,
             cumulative_step=cumulative,

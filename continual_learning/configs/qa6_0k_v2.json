@@ -1,4 +1,5 @@
 {
+  "protocol_version": "babilong-qa6-0k-cl-v2",
   "backbone": "openai-community/gpt2",
   "backbone_revision": "607a30d783dfa663caf39e06633721c8d4cfcd7e",
   "checkpoint_interval": 250,

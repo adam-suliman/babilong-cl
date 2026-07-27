@@ -36,6 +36,7 @@ def _add_config_arguments(parser: argparse.ArgumentParser, *, model_required: bo
     parser.add_argument("--precision", choices=("fp32", "bf16"))
     parser.add_argument("--microbatch-size", type=int)
     parser.add_argument("--steps-per-task", type=int)
+    parser.add_argument("--train-minibatches-per-task", type=int)
     parser.add_argument("--warmup-steps", type=int)
     parser.add_argument("--checkpoint-interval", type=int)
     parser.add_argument("--log-interval", type=int)
@@ -47,6 +48,23 @@ def _add_config_arguments(parser: argparse.ArgumentParser, *, model_required: bo
 
 def _config_from_args(args: argparse.Namespace) -> ExperimentConfig:
     payload = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    if (
+        getattr(args, "steps_per_task", None) is not None
+        and payload.get("training_budget_mode", "fixed_slow_steps")
+        == "fixed_train_minibatches"
+    ):
+        raise ValueError(
+            "--steps-per-task is incompatible with a fixed-minibatch protocol; "
+            "use --train-minibatches-per-task"
+        )
+    if (
+        getattr(args, "train_minibatches_per_task", None) is not None
+        and payload.get("training_budget_mode", "fixed_slow_steps")
+        != "fixed_train_minibatches"
+    ):
+        raise ValueError(
+            "--train-minibatches-per-task requires fixed_train_minibatches"
+        )
     overrides = {
         "model": getattr(args, "model", None),
         "cl_method": getattr(args, "cl_method", None),
@@ -63,6 +81,9 @@ def _config_from_args(args: argparse.Namespace) -> ExperimentConfig:
         "precision": getattr(args, "precision", None),
         "microbatch_size": getattr(args, "microbatch_size", None),
         "slow_steps_per_task": getattr(args, "steps_per_task", None),
+        "train_minibatches_per_task": getattr(
+            args, "train_minibatches_per_task", None
+        ),
         "warmup_steps": getattr(args, "warmup_steps", None),
         "checkpoint_interval": getattr(args, "checkpoint_interval", None),
         "log_interval": getattr(args, "log_interval", None),
@@ -102,15 +123,20 @@ def _validate_selected_si(
         "backbone",
         "backbone_revision",
         "precision",
-        "slow_steps_per_task",
-        "warmup_steps",
+        "training_budget_mode",
+        "train_minibatch_size",
+        "train_minibatches_per_task",
+        "fastmem_slow_update_freq",
+        "warmup_ratio",
+        "resolved_slow_steps_per_task",
+        "resolved_warmup_steps",
         "learning_rates",
         "weight_decay",
         "clip_grad_norm",
         "label_mask_policy",
         "loss_normalization",
         "microbatch_size",
-        "slow_batch_size",
+        "resolved_slow_batch_size",
         "data_seed",
         "si_epsilon",
         "si_decay",
@@ -157,8 +183,8 @@ def dry_run(config: ExperimentConfig, babi_archive: str) -> dict[str, Any]:
     manifest = prepare_data(config, babi_archive=babi_archive)
     fast_attempts = (
         len(config.resolved_order)
-        * config.slow_steps_per_task
-        * (config.slow_batch_size // config.fast_batch_size)
+        * config.resolved_slow_steps_per_task
+        * (config.resolved_slow_batch_size // config.fast_batch_size)
         if config.model in {"fastmem0", "fastmem"}
         else 0
     )
@@ -169,7 +195,9 @@ def dry_run(config: ExperimentConfig, babi_archive: str) -> dict[str, Any]:
         train = manifest["train"][task]
         stats = train["token_stats"]
         fitting = int(stats["fit_1024"])
-        effective = (fitting // config.slow_batch_size) * config.slow_batch_size
+        effective = (
+            fitting // config.resolved_slow_batch_size
+        ) * config.resolved_slow_batch_size
         task_rows[task] = {
             "source": train["source"],
             "source_rows": int(stats["rows"]),
@@ -181,9 +209,11 @@ def dry_run(config: ExperimentConfig, babi_archive: str) -> dict[str, Any]:
             "excluded_over_1024": int(stats["excluded_over_1024"]),
             "one_segment_rows": int(stats["one_segment_512"]),
             "two_segment_rows": int(stats["two_segment_1024"]),
-            "slow_steps": config.slow_steps_per_task,
-            "slow_examples": config.slow_steps_per_task
-            * config.slow_batch_size,
+            "slow_update_freq": config.slow_update_freq,
+            "slow_steps": config.resolved_slow_steps_per_task,
+            "train_minibatches": config.resolved_train_minibatches_per_task,
+            "training_examples": config.training_examples_per_task,
+            "warmup_steps": config.resolved_warmup_steps,
             "sampler_seed": config.sampler_seeds[task],
             "learning_rate": float(config.learning_rates[task]),
         }
@@ -193,9 +223,10 @@ def dry_run(config: ExperimentConfig, babi_archive: str) -> dict[str, Any]:
         "resolved_task_order": list(config.resolved_order),
         "task_protocol": task_rows,
         "total_cl_slow_steps": len(config.resolved_order)
-        * config.slow_steps_per_task,
-        "slow_examples_per_task": config.slow_steps_per_task
-        * config.slow_batch_size,
+        * config.resolved_slow_steps_per_task,
+        "total_cl_train_minibatches": len(config.resolved_order)
+        * config.resolved_train_minibatches_per_task,
+        "training_examples_per_task": config.training_examples_per_task,
         "fast_update_attempts": fast_attempts,
         "single_task_references": (
             list(config.resolved_order) if config.include_references else []

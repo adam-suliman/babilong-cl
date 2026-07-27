@@ -444,6 +444,131 @@ def test_metrics() -> None:
         assert claim["allowed"] is True
 
 
+def test_incremental_ar_cadence() -> None:
+    tokenizer = TinyTokenizer()
+    tiny = _gpt2_tiny_model_config()
+    with tempfile.TemporaryDirectory(
+        prefix="babilong-cl-ar-cadence-smoke-"
+    ) as temporary:
+        root = Path(temporary)
+        manifest = _tiny_data(root)
+        summaries = {}
+        configs = {}
+        for model in ("gpt2", "base_rmt", "fastmem0", "fastmem"):
+            config = replace(
+                _tiny_config(root / model, model),
+                data_dir=str(root / "data"),
+                protocol_version="babilong-qa6-0k-cl-v4-ar-cadence",
+                training_budget_mode="fixed_train_minibatches",
+                train_minibatch_size=2,
+                train_minibatches_per_task=2,
+                fastmem_slow_update_freq=2,
+                warmup_ratio=0.0,
+                slow_steps_per_task=None,
+                slow_batch_size=None,
+                warmup_steps=None,
+                fast_batch_size=2,
+            )
+            configs[model] = config
+            expected_freq = 2 if model in {"fastmem0", "fastmem"} else 1
+            expected_steps = 1 if expected_freq == 2 else 2
+            assert config.slow_update_freq == expected_freq
+            assert config.resolved_slow_steps_per_task == expected_steps
+            assert config.resolved_slow_batch_size == 2 * expected_freq
+            assert config.resolved_train_minibatches_per_task == 2
+            assert config.training_examples_per_task == 4
+
+            trainer = UnifiedTrainer(
+                config=config,
+                data_manifest=manifest,
+                tokenizer=tokenizer,
+                tiny_model_config=tiny,
+                tensorboard=False,
+            )
+            task = "qa1"
+            dataset = trainer._dataset("train", task)
+            trainer.scheduler = _task_scheduler(
+                trainer.optimizer,
+                learning_rate=float(config.learning_rates[task]),
+                warmup_steps=0,
+                total_steps=expected_steps,
+            )
+            trainer.bundle.model.train()
+            trainer.bundle.reset_fast_memory()
+            summary = trainer.train_task(
+                task=task,
+                dataset=dataset,
+                cursor=EpochBatchCursor(
+                    dataset_size=len(dataset),
+                    batch_size=config.resolved_slow_batch_size,
+                    task_seed=config.sampler_seeds[task],
+                ),
+                start_step=0,
+                target_steps=expected_steps,
+            )
+            summaries[model] = summary
+            assert summary["slow_steps"] == expected_steps
+            assert summary["slow_update_freq"] == expected_freq
+            assert summary["train_minibatches"] == 2
+            assert summary["examples_seen"] == 4
+            assert summary["fast_update_attempts"] == (
+                2 if model in {"fastmem0", "fastmem"} else 0
+            )
+            assert summary["fast_updates_applied"] == (2 if model == "fastmem" else 0)
+            trainer.monitor.close()
+
+        order = configs["base_rmt"].resolved_order
+        raws = []
+        for model, score in (
+            ("base_rmt", 0.70),
+            ("fastmem0", 0.72),
+            ("fastmem", 0.75),
+        ):
+            config = configs[model]
+            stage_template = summaries[model]
+            train_tasks = [
+                {
+                    **stage_template,
+                    "task": task,
+                    "task_sampler_seed": config.sampler_seeds[task],
+                }
+                for task in order
+            ]
+            raws.append(
+                {
+                    "config": config.to_dict(),
+                    "data_manifest_sha256": "matched-v4",
+                    "status": "complete",
+                    "cumulative_slow_steps": (
+                        config.resolved_slow_steps_per_task * len(order)
+                    ),
+                    "cumulative_train_minibatches": 2 * len(order),
+                    "fast_update_attempts": (
+                        2 * len(order)
+                        if model in {"fastmem0", "fastmem"}
+                        else 0
+                    ),
+                    "fast_updates_applied": (
+                        2 * len(order) if model == "fastmem" else 0
+                    ),
+                    "train_tasks": train_tasks,
+                    "metrics": {
+                        "compare_answers": {"final_all_task_accuracy": score}
+                    },
+                }
+            )
+        claim = strict_fastmem_claim(raws)
+        assert claim["allowed"] is True, claim
+        assert "incremental-AR cadence" in claim["reason"]
+
+        try:
+            replace(configs["gpt2"], data_seed=1)
+        except ValueError as error:
+            assert "data_seed=481113" in str(error)
+        else:
+            raise AssertionError("v4 accepted a changed canonical data seed")
+
+
 def test_protocol_v3_aggregation() -> None:
     with tempfile.TemporaryDirectory(
         prefix="babilong-cl-aggregate-smoke-"
@@ -943,6 +1068,7 @@ def main() -> None:
             test_token_normalization_and_microbatch_equivalence,
         ),
         ("metrics", test_metrics),
+        ("incremental-AR cadence", test_incremental_ar_cadence),
         ("protocol-v3 aggregation", test_protocol_v3_aggregation),
         ("SI GPU placement", test_si_gpu_placement),
         ("SI equations", test_si_equations),

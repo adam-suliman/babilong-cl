@@ -114,9 +114,9 @@ def ensure_references(
                 )
                 dataset = trainer._dataset("train", task)
                 target_steps = (
-                    config.slow_steps_per_task
+                    config.resolved_slow_steps_per_task
                     if max_steps_per_task is None
-                    else min(config.slow_steps_per_task, max_steps_per_task)
+                    else min(config.resolved_slow_steps_per_task, max_steps_per_task)
                 )
                 latest = path / "checkpoints" / "latest.pt"
                 start_step = 0
@@ -157,7 +157,7 @@ def ensure_references(
                 trainer.scheduler = _task_scheduler(
                     trainer.optimizer,
                     learning_rate=float(config.learning_rates[task]),
-                    warmup_steps=min(config.warmup_steps, target_steps),
+                    warmup_steps=min(config.resolved_warmup_steps, target_steps),
                     total_steps=target_steps,
                 )
                 if restored_scheduler is not None:
@@ -178,7 +178,7 @@ def ensure_references(
                     if restored_sampler is not None
                     else EpochBatchCursor(
                         dataset_size=len(dataset),
-                        batch_size=config.slow_batch_size,
+                        batch_size=config.resolved_slow_batch_size,
                         task_seed=config.sampler_seeds[task],
                     )
                 )
@@ -319,7 +319,7 @@ def run_experiment(
 ) -> dict[str, Any]:
     if (
         max_steps_per_task is not None
-        and int(max_steps_per_task) != config.slow_steps_per_task
+        and int(max_steps_per_task) != config.resolved_slow_steps_per_task
     ):
         raise ValueError(
             "A runtime max-step override would create a non-resumable stage boundary. "
@@ -381,7 +381,7 @@ def run_experiment(
             monitor.references(
                 task_order=config.resolved_order,
                 metrics=raw["metrics"]["compare_answers"],
-                steps_per_task=config.slow_steps_per_task,
+                steps_per_task=config.resolved_slow_steps_per_task,
             )
             monitor.flush()
             monitor.close()
@@ -460,15 +460,20 @@ def calibrate_si(
                 "backbone",
                 "backbone_revision",
                 "precision",
-                "slow_steps_per_task",
-                "warmup_steps",
+                "training_budget_mode",
+                "train_minibatch_size",
+                "train_minibatches_per_task",
+                "fastmem_slow_update_freq",
+                "warmup_ratio",
+                "resolved_slow_steps_per_task",
+                "resolved_warmup_steps",
                 "learning_rates",
                 "weight_decay",
                 "clip_grad_norm",
                 "label_mask_policy",
                 "loss_normalization",
                 "microbatch_size",
-                "slow_batch_size",
+                "resolved_slow_batch_size",
                 "data_seed",
                 "si_epsilon",
                 "si_decay",
