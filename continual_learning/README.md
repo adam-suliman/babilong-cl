@@ -10,17 +10,17 @@ The primary condition is `0k`: task facts only, with no PG19 background.
 
 ## Setup
 
-Python 3.11 and an NVIDIA driver compatible with CUDA 12.1 are expected.
+Python 3.10-3.12 and an NVIDIA driver compatible with CUDA 12.1 are expected.
 
 ```bash
 git clone git@github.com:adam-suliman/babilong-cl.git
 cd babilong-cl
-python3.11 -m venv .venv
+bash continual_learning/scripts/setup.sh
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install torch==2.3.1 --index-url https://download.pytorch.org/whl/cu121
-python -m pip install -r requirements.txt
 ```
+
+The setup helper chooses an available supported Python automatically. Override
+the selection when needed with `PYTHON_BIN=/path/to/python bash .../setup.sh`.
 
 For fish, activate with:
 
