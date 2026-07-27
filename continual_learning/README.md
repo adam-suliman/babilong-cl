@@ -136,6 +136,9 @@ reduce it after an OOM. The launcher requires at least 15 GB free and accounts
 for the larger temporary SI checkpoint during atomic replacement. A suite
 interrupt sends `SIGTERM` to children, which
 checkpoint at the next slow-step boundary, and does not schedule new jobs.
+Before launching concurrent workers, the suite loads the pinned tokenizer and
+GPT-2 checkpoint once on CPU. A dangling Hugging Face cache entry is repaired
+by redownloading the missing file, preventing shared-cache download races.
 
 ## Two-H100 Priority Run
 

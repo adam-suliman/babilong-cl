@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import gc
 import json
 import os
 import signal
@@ -22,6 +23,71 @@ CONDITIONS = {
     "fastmem0": ("fastmem0", "none"),
     "fastmem": ("fastmem", "none"),
 }
+
+
+def _prefetch_backbone_assets(config: ExperimentConfig) -> dict[str, Any]:
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    repaired_file = None
+
+    def load() -> tuple[Any, Any]:
+        tokenizer = AutoTokenizer.from_pretrained(
+            config.tokenizer,
+            revision=config.backbone_revision,
+        )
+        model = AutoModelForCausalLM.from_pretrained(
+            config.backbone,
+            revision=config.backbone_revision,
+        )
+        return tokenizer, model
+
+    try:
+        tokenizer, model = load()
+    except FileNotFoundError as error:
+        missing = Path(error.filename or "").name
+        repairable = {
+            "config.json",
+            "generation_config.json",
+            "merges.txt",
+            "model.safetensors",
+            "pytorch_model.bin",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "vocab.json",
+        }
+        if missing not in repairable:
+            raise
+        from huggingface_hub import hf_hub_download
+
+        repo_id = (
+            config.backbone
+            if missing
+            in {
+                "config.json",
+                "generation_config.json",
+                "model.safetensors",
+                "pytorch_model.bin",
+            }
+            else config.tokenizer
+        )
+        hf_hub_download(
+            repo_id=repo_id,
+            filename=missing,
+            revision=config.backbone_revision,
+            force_download=True,
+        )
+        repaired_file = missing
+        tokenizer, model = load()
+    parameter_count = sum(parameter.numel() for parameter in model.parameters())
+    del tokenizer, model
+    gc.collect()
+    return {
+        "backbone": config.backbone,
+        "tokenizer": config.tokenizer,
+        "revision": config.backbone_revision,
+        "parameter_count": parameter_count,
+        "repaired_file": repaired_file,
+    }
 
 
 def _take_launchable_assignment(
@@ -199,6 +265,21 @@ def launch_suite(
         manifest["finished_at_unix"] = time.time()
         atomic_write_json(suite_dir / "manifest.json", manifest)
         return manifest
+
+    if pending_jobs:
+        try:
+            manifest["asset_preflight"] = _prefetch_backbone_assets(base_config)
+        except Exception as error:
+            manifest["status"] = "asset_preflight_failed"
+            manifest["asset_preflight_error"] = repr(error)
+            manifest["finished_at_unix"] = time.time()
+            atomic_write_json(suite_dir / "manifest.json", manifest)
+            raise RuntimeError(
+                "Backbone/tokenizer preflight failed before suite workers were launched"
+            ) from error
+    else:
+        manifest["asset_preflight"] = {"status": "skipped_no_pending_jobs"}
+    atomic_write_json(suite_dir / "manifest.json", manifest)
 
     slots = list(
         (gpu, slot) for gpu in gpus for slot in range(jobs_per_gpu)
