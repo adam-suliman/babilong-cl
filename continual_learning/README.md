@@ -140,7 +140,7 @@ checkpoint at the next slow-step boundary, and does not schedule new jobs.
 ## Two-H100 Priority Run
 
 The tracked profile uses only GPUs 0 and 1, two jobs per GPU, replicate seeds
-49/50, and order seeds 230/806:
+48/49, and order seeds 230/806:
 
 ```bash
 cat continual_learning/configs/h100_two_gpu_priority.env
