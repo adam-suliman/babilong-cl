@@ -108,12 +108,39 @@ def capture_rng_state() -> dict[str, Any]:
     return state
 
 
+def _cpu_rng_byte_tensor(value: Any, *, name: str) -> torch.Tensor:
+    if not isinstance(value, torch.Tensor):
+        raise TypeError(f"{name} RNG state must be a torch.Tensor")
+    if value.dtype != torch.uint8:
+        raise TypeError(f"{name} RNG state must have dtype torch.uint8")
+    if value.ndim != 1:
+        raise ValueError(f"{name} RNG state must be one-dimensional")
+    # torch.load(map_location=<cuda device>) also remaps the RNG tensors stored
+    # in a checkpoint. PyTorch's RNG restore APIs require CPU ByteTensors.
+    return value.detach().cpu().contiguous()
+
+
 def restore_rng_state(state: Mapping[str, Any]) -> None:
     random.setstate(state["python"])
     np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch_cpu"])
+    torch.set_rng_state(
+        _cpu_rng_byte_tensor(state["torch_cpu"], name="CPU")
+    )
     if "torch_cuda" in state and torch.cuda.is_available():
-        torch.cuda.set_rng_state_all(state["torch_cuda"])
+        cuda_states = state["torch_cuda"]
+        if not isinstance(cuda_states, (list, tuple)):
+            raise TypeError("CUDA RNG state must be a list or tuple")
+        if len(cuda_states) != torch.cuda.device_count():
+            raise ValueError(
+                "CUDA RNG state count does not match visible CUDA device count: "
+                f"checkpoint={len(cuda_states)}, visible={torch.cuda.device_count()}"
+            )
+        torch.cuda.set_rng_state_all(
+            [
+                _cpu_rng_byte_tensor(value, name=f"CUDA device {index}")
+                for index, value in enumerate(cuda_states)
+            ]
+        )
 
 
 def seed_everything(seed: int, *, deterministic: bool = True) -> None:

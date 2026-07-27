@@ -33,7 +33,13 @@ from .reporting import (
 )
 from .strategies import SynapticIntelligence, SynapticIntelligenceConfig
 from .trainer import EpochBatchCursor, UnifiedTrainer, _task_scheduler
-from .util import atomic_write_json, json_sha256, seed_everything
+from .util import (
+    atomic_write_json,
+    capture_rng_state,
+    json_sha256,
+    restore_rng_state,
+    seed_everything,
+)
 
 
 class TinyTokenizer:
@@ -865,6 +871,34 @@ def test_tiny_end_to_end_and_resume() -> None:
                 assert len(resumed["train_tasks"]) == 2
 
 
+def test_rng_checkpoint_device_normalization() -> None:
+    original = capture_rng_state()
+    try:
+        seed_everything(918273)
+        saved = capture_rng_state()
+        expected_cpu = torch.rand(8)
+
+        remapped = copy.deepcopy(saved)
+        if torch.cuda.is_available():
+            remapped["torch_cpu"] = remapped["torch_cpu"].to("cuda:0")
+            remapped["torch_cuda"] = [
+                value.to("cuda:0") for value in remapped["torch_cuda"]
+            ]
+        restore_rng_state(remapped)
+        torch.testing.assert_close(torch.rand(8), expected_cpu, rtol=0, atol=0)
+
+        malformed = copy.deepcopy(saved)
+        malformed["torch_cpu"] = malformed["torch_cpu"].to(torch.int64)
+        try:
+            restore_rng_state(malformed)
+        except TypeError as error:
+            assert "torch.uint8" in str(error)
+        else:
+            raise AssertionError("Malformed RNG state did not fail closed")
+    finally:
+        restore_rng_state(original)
+
+
 def test_midtask_resume_equivalence() -> None:
     tokenizer = TinyTokenizer()
     tiny = _gpt2_tiny_model_config()
@@ -1074,6 +1108,10 @@ def main() -> None:
         ("SI equations", test_si_equations),
         ("model/FastMem contract", test_model_and_fastmem_contract),
         ("tiny end-to-end/resume", test_tiny_end_to_end_and_resume),
+        (
+            "RNG checkpoint device normalization",
+            test_rng_checkpoint_device_normalization,
+        ),
         ("mid-task resume equivalence", test_midtask_resume_equivalence),
     ]
     for name, test in tests:
